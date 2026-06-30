@@ -3,8 +3,9 @@
 streamlit>=1.40.0,<1.59.0
 
 # --- Google Sheets live backend (st.connection("gsheets", ...)) -------------
+# st-gsheets-connection requires gspread<6, so pin within its supported range.
 st-gsheets-connection>=0.0.4
-gspread>=6.0.0
+gspread>=5.8.0,<6
 google-auth>=2.30.0
 
 # --- Data handling ----------------------------------------------------------
