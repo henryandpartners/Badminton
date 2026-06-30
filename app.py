@@ -213,11 +213,14 @@ def write_payments(df: pd.DataFrame) -> bool:
 
 # Map month number to existing sheet tab name
 MONTH_TABS = {
-    1: "7 2026-01", 2: "7 2026-02", 3: "7 2026-03", 4: "7 2026-04",
-    5: "7 2026-05", 6: "5 2026-06",
+    1: "2026-01", 2: "2026-02", 3: "2026-03", 4: "2026-04",
+    5: "2026-05", 6: "2026-06",
     7: "2026-07", 8: "2026-08", 9: "2026-09",
     10: "2026-10", 11: "2026-11", 12: "2026-12",
 }
+
+# Tab where game logs are saved
+GAME_LOG_WS = "GameLog"
 
 
 def get_month_tab(date: dt.date) -> str:
@@ -226,51 +229,48 @@ def get_month_tab(date: dt.date) -> str:
 
 
 def append_game_log(recorded_games: list, session_date: dt.date) -> bool:
-    """Write today's game log as a new row in the correct monthly tab.
+    """Write today's game log as new rows in the GameLog tab.
 
-    Each game gets a row: Date, Game#, Players, Shuttles.
-    Reads existing content and appends.
+    Each game gets a row: Date, Game#, Players, Shuttles, ShuttleFee.
+    Appends after existing data.
     """
     conn = get_connection()
-    tab = get_month_tab(session_date)
     date_str = session_date.isoformat()
+    price = float(st.session_state.get("shuttle_price", DEFAULT_SHUTTLE_PRICE))
 
     # Build rows
     rows = []
     for g in recorded_games:
+        cost = g["shuttles"] * price
+        per_player = round(cost / len(g["players"]), 2) if g["players"] else 0
         rows.append([
             date_str,
             f"Game {g['game']}",
             ", ".join(g["players"]),
             g["shuttles"],
+            per_player,
         ])
 
     try:
-        # Read existing data to find where to append
-        existing = conn.read(worksheet=tab, ttl=0)
+        existing = conn.read(worksheet=GAME_LOG_WS, ttl=0)
         if existing is not None and not existing.empty:
-            # Find the last row with data
             existing = existing.dropna(how="all")
-            start_row = len(existing) + 1  # 1-indexed, after all data
+            start_row = len(existing) + 2  # header row + data rows
         else:
-            # Write header
-            header = [["Date", "Game", "Players", "Shuttles"]]
-            conn.update(worksheet=tab, data=header)
-            start_row = 2  # After header
+            header = [["Date", "Game", "Players", "Shuttles", "Fee/Player"]]
+            conn.update(worksheet=GAME_LOG_WS, data=header)
+            start_row = 2
 
-        # Append new rows
-        conn.update(worksheet=tab, data=rows, cell=f"A{start_row}")
+        conn.update(worksheet=GAME_LOG_WS, data=rows, cell=f"A{start_row}")
         return True
     except Exception as exc:
-        # Tab may not exist — try creating header first
         try:
-            header = [["Date", "Game", "Players", "Shuttles"]]
-            conn.update(worksheet=tab, data=header)
-            # Then append
-            conn.update(worksheet=tab, data=rows, cell="A2")
+            header = [["Date", "Game", "Players", "Shuttles", "Fee/Player"]]
+            conn.update(worksheet=GAME_LOG_WS, data=header)
+            conn.update(worksheet=GAME_LOG_WS, data=rows, cell="A2")
             return True
         except Exception as exc2:
-            st.error(f"Could not write to tab '{tab}': {exc2}")
+            st.error(f"Could not write to '{GAME_LOG_WS}' tab: {exc2}")
             return False
 
 
@@ -596,8 +596,8 @@ def view_game_recorder(players: pd.DataFrame) -> None:
     if ss["recorded_games"]:
         st.subheader("💾 Save to Sheet")
         st.caption(
-            f"Write all {len(ss['recorded_games'])} game(s) to the **{get_month_tab(ss['session_date'])}** tab "
-            f"under **{ss['session_date']}**."
+            f"Save all {len(ss['recorded_games'])} game(s) to the **{GAME_LOG_WS}** tab "
+            f"under date **{ss['session_date']}**."
         )
 
         col_save, col_push, col_clear = st.columns(3)
@@ -606,7 +606,7 @@ def view_game_recorder(players: pd.DataFrame) -> None:
             if st.button("💾 Save games to Sheet", type="primary", use_container_width=True):
                 with st.spinner("Writing to Google Sheets…"):
                     if append_game_log(ss["recorded_games"], ss["session_date"]):
-                        st.success(f"✅ {len(ss['recorded_games'])} game(s) saved to '{get_month_tab(ss['session_date'])}'!")
+                        st.success(f"✅ {len(ss['recorded_games'])} game(s) saved to '{GAME_LOG_WS}'!")
                         st.balloons()
 
         with col_push:
