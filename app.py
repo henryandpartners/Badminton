@@ -7,15 +7,19 @@ slips against players — all backed live by a Google Sheet.
 
 Backend schema (Google Sheet)
 -----------------------------
-Worksheet "Players":
-    | Name | PromptPayID |
-    PromptPayID is a Thai mobile number (e.g. 0812345678) or a 13-digit
-    national ID / tax ID used to receive PromptPay transfers.
+Worksheet "ผู้เล่น" (existing roster — READ ONLY):
+    Player names are read from the "ชื่อผู้เล่น" column. Member/casual type and
+    monthly fees are intentionally ignored — costs are split flat.
 
-Worksheet "Ledger":
-    | Date | Player | Present | ShuttlesUsed | ShuttlePrice |
-    | CourtFee | AmountDue | PaymentStatus |
-    One row is written per checked-in player, per session date.
+Worksheet "Payments" (created and owned by this app):
+    | Date | Player | ShuttlesUsed | ShuttlePrice | CourtFee |
+    | AmountDue | PaymentStatus |
+    One row per checked-in player, per session date. The app never writes to
+    the existing monthly attendance tabs or the dashboard.
+
+Payments collect into a single PromptPay account configured in secrets:
+    [promptpay]
+    id = "0812345678"   # the organiser's number / ID that receives transfers
 
 Run with:  streamlit run app.py
 """
@@ -53,13 +57,18 @@ except Exception:  # pragma: no cover - import guard
 # =============================================================================
 # Configuration & constants
 # =============================================================================
-PLAYERS_WS = "Players"
-LEDGER_WS = "Ledger"
+# Roster lives in the existing Thai "players" worksheet; we only read the name
+# column (member/casual type & fees are intentionally ignored — flat split).
+ROSTER_WS = "ผู้เล่น"
+ROSTER_NAME_COL = "ชื่อผู้เล่น"
 
-LEDGER_COLUMNS = [
+# The app writes its own daily split + payment status to a dedicated tab so it
+# never disturbs the existing monthly attendance tabs or the dashboard formulas.
+PAYMENTS_WS = "Payments"
+
+PAYMENTS_COLUMNS = [
     "Date",
     "Player",
-    "Present",
     "ShuttlesUsed",
     "ShuttlePrice",
     "CourtFee",
@@ -138,101 +147,96 @@ def get_connection():
 
 
 def read_players() -> pd.DataFrame:
-    """Read the registered player roster. Returns an empty frame on failure."""
-    conn = get_connection()
-    try:
-        df = conn.read(worksheet=PLAYERS_WS, ttl=READ_TTL)
-        df = df.dropna(how="all")
-        # Normalise expected columns
-        if "Name" not in df.columns:
-            st.warning(
-                f"Worksheet '{PLAYERS_WS}' is missing a 'Name' column. "
-                "Expected columns: Name, PromptPayID."
-            )
-            return pd.DataFrame(columns=["Name", "PromptPayID"])
-        if "PromptPayID" not in df.columns:
-            df["PromptPayID"] = ""
-        df["Name"] = df["Name"].astype(str).str.strip()
-        df["PromptPayID"] = df["PromptPayID"].fillna("").astype(str).str.strip()
-        return df[df["Name"] != ""].reset_index(drop=True)
-    except Exception as exc:  # pragma: no cover - network/runtime guard
-        st.error(f"Could not read the '{PLAYERS_WS}' worksheet: {exc}")
-        return pd.DataFrame(columns=["Name", "PromptPayID"])
+    """Read the player roster from the Thai 'ผู้เล่น' worksheet.
 
-
-def write_players(df: pd.DataFrame) -> bool:
-    """Overwrite the Players worksheet with `df`. Returns True on success."""
-    conn = get_connection()
-    try:
-        clean = df.copy()
-        # Keep only the canonical columns, in order.
-        for col in ["Name", "PromptPayID"]:
-            if col not in clean.columns:
-                clean[col] = ""
-        clean = clean[["Name", "PromptPayID"]]
-        clean["Name"] = clean["Name"].astype(str).str.strip()
-        clean["PromptPayID"] = clean["PromptPayID"].fillna("").astype(str).str.strip()
-        clean = clean[clean["Name"] != ""].reset_index(drop=True)
-        conn.update(worksheet=PLAYERS_WS, data=clean)
-        return True
-    except Exception as exc:  # pragma: no cover - network/runtime guard
-        st.error(f"Failed to write to the '{PLAYERS_WS}' worksheet: {exc}")
-        return False
-
-
-def read_ledger() -> pd.DataFrame:
-    """Read the full ledger. Returns an empty (typed) frame on failure."""
-    conn = get_connection()
-    try:
-        df = conn.read(worksheet=LEDGER_WS, ttl=READ_TTL)
-        df = df.dropna(how="all")
-        # Guarantee all expected columns exist
-        for col in LEDGER_COLUMNS:
-            if col not in df.columns:
-                df[col] = pd.NA
-        return df[LEDGER_COLUMNS].reset_index(drop=True)
-    except Exception:
-        # Sheet may simply be empty / not created yet — that's fine.
-        return pd.DataFrame(columns=LEDGER_COLUMNS)
-
-
-def write_ledger(df: pd.DataFrame) -> bool:
-    """Overwrite the Ledger worksheet with `df`. Returns True on success.
-
-    `st-gsheets-connection`'s `update()` replaces the entire worksheet, so the
-    caller is responsible for passing the *complete* desired ledger state.
+    Reads only the name column, drops blanks / repeated headers, and
+    de-duplicates while preserving order. Returns a frame with a single
+    'Name' column (empty on failure).
     """
     conn = get_connection()
     try:
-        clean = df[LEDGER_COLUMNS].copy()
-        conn.update(worksheet=LEDGER_WS, data=clean)
+        df = conn.read(worksheet=ROSTER_WS, ttl=READ_TTL)
+        df = df.dropna(how="all")
+        # The roster's name column is the Thai header; fall back to first column.
+        if ROSTER_NAME_COL in df.columns:
+            names = df[ROSTER_NAME_COL]
+        else:
+            names = df.iloc[:, 0]
+        names = names.fillna("").astype(str).str.strip()
+        seen, ordered = set(), []
+        for n in names:
+            if not n or n == ROSTER_NAME_COL or n in seen:
+                continue  # skip blanks, repeated header rows, and duplicates
+            seen.add(n)
+            ordered.append(n)
+        return pd.DataFrame({"Name": ordered})
+    except Exception as exc:  # pragma: no cover - network/runtime guard
+        st.error(f"Could not read the '{ROSTER_WS}' worksheet: {exc}")
+        return pd.DataFrame(columns=["Name"])
+
+
+def read_payments() -> pd.DataFrame:
+    """Read the app-managed Payments tab. Returns an empty frame on failure."""
+    conn = get_connection()
+    try:
+        df = conn.read(worksheet=PAYMENTS_WS, ttl=READ_TTL)
+        df = df.dropna(how="all")
+        for col in PAYMENTS_COLUMNS:
+            if col not in df.columns:
+                df[col] = pd.NA
+        return df[PAYMENTS_COLUMNS].reset_index(drop=True)
+    except Exception:
+        # Tab may be empty — that's fine.
+        return pd.DataFrame(columns=PAYMENTS_COLUMNS)
+
+
+def write_payments(df: pd.DataFrame) -> bool:
+    """Overwrite the Payments tab with `df`. Returns True on success.
+
+    `st-gsheets-connection`'s `update()` replaces the entire worksheet, so the
+    caller must pass the *complete* desired Payments state.
+    """
+    conn = get_connection()
+    try:
+        clean = df[PAYMENTS_COLUMNS].copy()
+        conn.update(worksheet=PAYMENTS_WS, data=clean)
         return True
     except Exception as exc:  # pragma: no cover - network/runtime guard
-        st.error(f"Failed to write to the '{LEDGER_WS}' worksheet: {exc}")
+        st.error(f"Failed to write to the '{PAYMENTS_WS}' tab: {exc}")
         return False
 
 
 def upsert_session_rows(session_rows: pd.DataFrame) -> bool:
-    """Insert/replace all ledger rows for the session's date.
+    """Insert/replace all Payments rows for the session's date.
 
     Removes any pre-existing rows for the same Date (idempotent re-locking)
-    and appends the freshly calculated rows, then pushes the whole ledger back.
+    and appends the freshly calculated rows, then pushes the whole tab back.
     """
     if session_rows.empty:
         st.warning("No checked-in players to write.")
         return False
 
     session_date = str(session_rows["Date"].iloc[0])
-    existing = read_ledger()
+    existing = read_payments()
     # Drop prior rows for this date so re-running the split is idempotent.
     kept = existing[existing["Date"].astype(str) != session_date]
     combined = pd.concat([kept, session_rows], ignore_index=True)
-    return write_ledger(combined)
+    return write_payments(combined)
 
 
 # =============================================================================
 # PromptPay QR generation
 # =============================================================================
+def get_collector_promptpay() -> str:
+    """The single account that collects payments, from st.secrets['promptpay'].
+
+    Everyone pays into the same organiser account, so we encode that one ID in
+    every QR (with each player's amount). Returns '' if not configured.
+    """
+    cfg = st.secrets.get("promptpay", {}) if hasattr(st, "secrets") else {}
+    return str(cfg.get("id", "")).strip()
+
+
 def generate_promptpay_qr(promptpay_id: str, amount: float) -> Optional[bytes]:
     """Return PNG bytes of a PromptPay QR encoding `amount` for `promptpay_id`.
 
@@ -243,7 +247,10 @@ def generate_promptpay_qr(promptpay_id: str, amount: float) -> Optional[bytes]:
         st.error("`promptpay` library not installed — cannot generate QR codes.")
         return None
     if not promptpay_id:
-        st.warning("No PromptPay ID on file for this player.")
+        st.warning(
+            "No collector PromptPay account configured. Set [promptpay] id in "
+            "your secrets (the account that receives payments)."
+        )
         return None
     try:
         payload = promptpay_qrcode.generate_payload(
@@ -254,7 +261,7 @@ def generate_promptpay_qr(promptpay_id: str, amount: float) -> Optional[bytes]:
         img.save(buf, format="PNG")
         return buf.getvalue()
     except Exception as exc:  # pragma: no cover - runtime guard
-        st.error(f"QR generation failed for {promptpay_id}: {exc}")
+        st.error(f"QR generation failed: {exc}")
         return None
 
 
@@ -327,10 +334,10 @@ def match_amounts_to_pending(ledger: pd.DataFrame, amounts: list[float], tol: fl
     return matches
 
 
-def mark_player_paid(ledger: pd.DataFrame, idx) -> bool:
-    """Flip a single ledger row to Paid and write the whole ledger back."""
-    ledger.loc[idx, "PaymentStatus"] = STATUS_PAID
-    return write_ledger(ledger)
+def mark_player_paid(payments: pd.DataFrame, idx) -> bool:
+    """Flip a single Payments row to Paid and write the whole tab back."""
+    payments.loc[idx, "PaymentStatus"] = STATUS_PAID
+    return write_payments(payments)
 
 
 # =============================================================================
@@ -360,8 +367,7 @@ def view_live_tracker(players: pd.DataFrame) -> None:
     st.subheader("✅ Attendance")
     if players.empty:
         st.info(
-            "No players found. Add players (Name, PromptPayID) to the "
-            f"'{PLAYERS_WS}' worksheet."
+            f"No players found. Add player names to the '{ROSTER_WS}' worksheet."
         )
     else:
         st.caption("Tap a player to flag them **Present** for today.")
@@ -423,17 +429,18 @@ def view_live_tracker(players: pd.DataFrame) -> None:
 # VIEW 2 — End-of-Day Ledger & PromptPay QR
 # =============================================================================
 def compute_split(players: pd.DataFrame) -> pd.DataFrame:
-    """Build the per-player split DataFrame for the active session date."""
+    """Build the per-player split DataFrame for the active session date.
+
+    Flat equal split across everyone checked in (no member/casual distinction).
+    """
     present_names = [n for n, v in st.session_state.attendance.items() if v]
     count = len(present_names)
     if count == 0:
-        return pd.DataFrame(columns=LEDGER_COLUMNS)
+        return pd.DataFrame(columns=PAYMENTS_COLUMNS)
 
     total_shuttle_cost = st.session_state.shuttles_used * st.session_state.shuttle_price
     grand_total = total_shuttle_cost + st.session_state.court_fee
     individual_due = round(grand_total / count, 2)
-
-    pp_map = dict(zip(players["Name"], players.get("PromptPayID", pd.Series(dtype=str))))
 
     rows = []
     for name in present_names:
@@ -441,7 +448,6 @@ def compute_split(players: pd.DataFrame) -> pd.DataFrame:
             {
                 "Date": str(st.session_state.session_date),
                 "Player": name,
-                "Present": True,
                 "ShuttlesUsed": st.session_state.shuttles_used,
                 "ShuttlePrice": st.session_state.shuttle_price,
                 "CourtFee": st.session_state.court_fee,
@@ -449,10 +455,7 @@ def compute_split(players: pd.DataFrame) -> pd.DataFrame:
                 "PaymentStatus": STATUS_PENDING,
             }
         )
-    df = pd.DataFrame(rows, columns=LEDGER_COLUMNS)
-    # Attach PromptPay IDs for QR rendering (not persisted to ledger).
-    df["_PromptPayID"] = df["Player"].map(pp_map).fillna("")
-    return df
+    return pd.DataFrame(rows, columns=PAYMENTS_COLUMNS)
 
 
 def view_ledger(players: pd.DataFrame) -> None:
@@ -481,38 +484,43 @@ def view_ledger(players: pd.DataFrame) -> None:
     split_df = compute_split(players)
 
     st.subheader("Split summary")
-    st.dataframe(
-        split_df.drop(columns=["_PromptPayID"]),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(split_df, use_container_width=True, hide_index=True)
 
     # ---- Lock & write back to the sheet ----------------------------------
-    if st.button("🔒 Lock totals & write to Google Sheet", type="primary"):
-        with st.spinner("Writing ledger to Google Sheet…"):
-            persist_df = split_df.drop(columns=["_PromptPayID"])
-            if upsert_session_rows(persist_df):
+    if st.button("🔒 Lock totals & write to Payments tab", type="primary"):
+        with st.spinner("Writing to the Payments tab…"):
+            if upsert_session_rows(split_df):
                 st.session_state.locked_split = split_df
-                st.success("Ledger saved. ✅")
+                st.success("Saved to the Payments tab. ✅")
                 st.balloons()
 
     st.divider()
 
     # ---- PromptPay QR per player -----------------------------------------
+    collector = get_collector_promptpay()
     st.subheader("📱 PromptPay QR codes")
-    st.caption("Each player scans their own QR to pay the exact amount.")
+    if collector:
+        st.caption(
+            f"Each player scans to pay their exact amount into the collector "
+            f"account ({collector})."
+        )
+    else:
+        st.warning(
+            "Set [promptpay] id in your secrets (the account that receives "
+            "payments) to enable QR codes."
+        )
     for _, row in split_df.iterrows():
         with st.container(border=True):
             top = st.columns([2, 1])
             top[0].markdown(f"**{row['Player']}**")
             top[1].markdown(f"**{row['AmountDue']:,.2f} THB**")
             if st.button(f"Show QR — {row['Player']}", key=f"qr_{row['Player']}"):
-                png = generate_promptpay_qr(row["_PromptPayID"], row["AmountDue"])
+                png = generate_promptpay_qr(collector, row["AmountDue"])
                 if png:
                     st.image(
                         png,
                         caption=f"{row['Player']} · {row['AmountDue']:,.2f} THB "
-                        f"· {row['_PromptPayID']}",
+                        f"→ {collector}",
                         width=260,
                     )
 
@@ -551,7 +559,7 @@ def view_slip_verification() -> None:
         "mark them Paid. (Reads the image only; doesn't verify with the bank.)"
     )
 
-    ledger = read_ledger()
+    ledger = read_payments()
 
     uploaded = st.file_uploader(
         "Upload transfer slip (JPG / PNG)",
@@ -624,51 +632,20 @@ def view_slip_verification() -> None:
 
 
 # =============================================================================
-# VIEW 4 — Roster Manager
+# VIEW 4 — Roster (read-only)
 # =============================================================================
 def view_roster(players: pd.DataFrame) -> None:
-    st.header("👥 Roster Manager")
+    st.header("👥 Roster")
     st.caption(
-        "Add, rename or remove players and edit their PromptPay IDs, then save "
-        f"back to the '{PLAYERS_WS}' worksheet."
+        f"Players are read live from the '{ROSTER_WS}' worksheet. Add or remove "
+        "players there — this view is read-only so the app never overwrites "
+        "your existing roster columns."
     )
-
-    base = players.copy()
-    if base.empty:
-        base = pd.DataFrame(columns=["Name", "PromptPayID"])
-
-    edited = st.data_editor(
-        base[["Name", "PromptPayID"]],
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Name": st.column_config.TextColumn("Name", required=True),
-            "PromptPayID": st.column_config.TextColumn(
-                "PromptPay ID",
-                help="Thai mobile number (0812345678) or 13-digit national/tax ID",
-            ),
-        },
-        key="roster_editor",
-    )
-
-    # Basic validation feedback before the user commits.
-    names = edited["Name"].astype(str).str.strip()
-    dupes = names[names.duplicated() & (names != "")].unique().tolist()
-    if dupes:
-        st.warning(f"Duplicate player names will be merged on save: {', '.join(dupes)}")
-
-    if st.button("💾 Save roster to Google Sheet", type="primary"):
-        with st.spinner("Saving roster…"):
-            # Drop duplicate names (keep first) to keep attendance keys unique.
-            to_save = edited.copy()
-            to_save["Name"] = to_save["Name"].astype(str).str.strip()
-            to_save = to_save[to_save["Name"] != ""].drop_duplicates(
-                subset=["Name"], keep="first"
-            )
-            if write_players(to_save):
-                st.success(f"Saved {len(to_save)} players. ✅")
-                st.rerun()
+    if players.empty:
+        st.info(f"No players found in '{ROSTER_WS}'.")
+        return
+    st.metric("Players in roster", len(players))
+    st.dataframe(players[["Name"]], use_container_width=True, hide_index=True)
 
 
 # =============================================================================
@@ -676,9 +653,9 @@ def view_roster(players: pd.DataFrame) -> None:
 # =============================================================================
 def view_history() -> None:
     st.header("📊 Season History")
-    ledger = read_ledger()
+    ledger = read_payments()
     if ledger.empty:
-        st.info("No sessions recorded yet. Lock a ledger to start building history.")
+        st.info("No sessions recorded yet. Lock a session to start building history.")
         return
 
     led = ledger.copy()

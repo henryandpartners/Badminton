@@ -43,7 +43,7 @@ def _write_dummy_secrets() -> None:
     (secrets_dir / "secrets.toml").write_text(
         f"""[connections.gsheets]
 spreadsheet = "https://docs.google.com/spreadsheets/d/TEST/edit"
-worksheet = "Players"
+worksheet = "ผู้เล่น"
 type = "service_account"
 project_id = "test"
 private_key_id = "test"
@@ -55,6 +55,9 @@ token_uri = "https://oauth2.googleapis.com/token"
 auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 client_x509_cert_url = "https://example.com"
 universe_domain = "googleapis.com"
+
+[promptpay]
+id = "0812345678"
 """
     )
 

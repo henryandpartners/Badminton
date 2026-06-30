@@ -16,30 +16,31 @@ phone browser court-side.
 | View | What it does |
 |------|--------------|
 | 🏟️ **Live Tracker** | Toggle player attendance, giant ➕/➖ shuttle counter, court-fee input, live running total. |
-| 🧾 **Ledger & QR** | Splits the bill `(Court Fee + Shuttles × Price) ÷ Present players`, writes each player's row back to the Sheet, and renders a per-player PromptPay QR for the exact amount. |
+| 🧾 **Ledger & QR** | Splits the bill `(Court Fee + Shuttles × Price) ÷ players present`, writes each player's row to the `Payments` tab, and renders a PromptPay QR (collector account + exact amount). |
 | 📥 **Slip Verify** | Drag-and-drop a JPG/PNG slip → OCR reads the amount → it's matched to the player who owes it → you confirm → their row flips `Pending → Paid`. Includes a manual-reconcile fallback. |
+| 👥 **Roster** | Read-only list of players, read live from the `ผู้เล่น` worksheet. |
+| 📊 **History** | Per-player and per-session summaries + outstanding-balance chart from the `Payments` tab. |
 
 ---
 
 ## Google Sheet schema
 
-Create two worksheets (tabs) in your sheet.
+The app works against an existing Thai badminton sheet:
 
-**`Players`**
+**`ผู้เล่น`** (existing roster — **read only**)
+: Player names are read from the `ชื่อผู้เล่น` column. Member/casual type and
+  monthly fees are ignored — costs are split flat among everyone present.
 
-| Name | PromptPayID |
-|------|-------------|
-| Som  | 0812345678  |
-| Nok  | 0898765432  |
+**`Payments`** (created and owned by the app)
 
-`PromptPayID` is a Thai mobile number or a 13-digit national/tax ID.
+| Date | Player | ShuttlesUsed | ShuttlePrice | CourtFee | AmountDue | PaymentStatus |
+|------|--------|--------------|--------------|----------|-----------|---------------|
 
-**`Ledger`** (the app creates/overwrites rows here)
+The app **never** writes to the existing monthly attendance tabs or the
+dashboard — only to its own `Payments` tab.
 
-| Date | Player | Present | ShuttlesUsed | ShuttlePrice | CourtFee | AmountDue | PaymentStatus |
-|------|--------|---------|--------------|--------------|----------|-----------|---------------|
-
-> Share the Sheet with your service account's `client_email` (Editor access).
+> Share the Sheet with your service account's `client_email` (Editor access),
+> and set the collector account under `[promptpay]` in secrets.
 
 ---
 
@@ -72,5 +73,5 @@ Individual Due = (Total Court Fee + (Shuttles Used × Shuttle Unit Price))
                               Count of Checked-In Players
 ```
 
-Locking the totals writes one `Ledger` row per present player for that date.
+Locking the totals writes one `Payments` row per present player for that date.
 Re-locking the same date is idempotent (it replaces that date's rows).
