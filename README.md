@@ -15,8 +15,8 @@ phone browser court-side.
 
 | View | What it does |
 |------|--------------|
-| 🏟️ **Live Tracker** | Toggle player attendance, giant ➕/➖ shuttle counter, court-fee input, live running total. |
-| 🧾 **Split** | Splits the bill `(Court Fee + Shuttles × Price) ÷ players present` and writes each player's row to the `Payments` tab. |
+| 🏟️ **Live Tracker** | Toggle player check-in, giant ➕/➖ shuttle counter, and **per-game player selection** (pick who played each game), plus the court fee per person. |
+| 🧾 **Split** | Each player pays `court fee + their shuttle share`; the day's shuttle cost is split across games and shared among each game's players. Writes each row to the `Payments` tab. |
 | 📥 **Slip Verify** | Drag-and-drop a JPG/PNG slip → OCR reads the amount → it's matched to the player who owes it → you confirm → their row flips `Pending → Paid`. Includes a manual-reconcile fallback. |
 | 👥 **Roster** | Read-only list of players, read live from the `ผู้เล่น` worksheet. |
 | 📊 **History** | Per-player and per-session summaries + outstanding-balance chart from the `Payments` tab. |
@@ -29,12 +29,12 @@ The app works against an existing Thai badminton sheet:
 
 **`ผู้เล่น`** (existing roster — **read only**)
 : Player names are read from the `ชื่อผู้เล่น` column. Member/casual type and
-  monthly fees are ignored — costs are split flat among everyone present.
+  monthly fees are ignored.
 
 **`Payments`** (created and owned by the app)
 
-| Date | Player | ShuttlesUsed | ShuttlePrice | CourtFee | AmountDue | PaymentStatus |
-|------|--------|--------------|--------------|----------|-----------|---------------|
+| Date | Player | GamesPlayed | CourtFee | ShuttleShare | AmountDue | PaymentStatus |
+|------|--------|-------------|----------|--------------|-----------|---------------|
 
 The app **never** writes to the existing monthly attendance tabs or the
 dashboard — only to its own `Payments` tab.
@@ -66,11 +66,20 @@ template is tracked.
 
 ## How the split works
 
+Each checked-in player owes a **flat court fee** (default 80 THB) plus a
+**shuttle share**:
+
 ```
-Individual Due = (Total Court Fee + (Shuttles Used × Shuttle Unit Price))
-                 ─────────────────────────────────────────────────────────
-                              Count of Checked-In Players
+Court    = court_fee_per_person                       (per checked-in player)
+
+Shuttle  = total_shuttle_cost split across games; within each game the cost is
+           shared equally among the players who played it. A player's shuttle
+           share is the sum of their per-game shares.
+           (If no games are recorded, shuttles are split equally instead.)
+
+Amount Due = Court + Shuttle share
 ```
 
-Locking the totals writes one `Payments` row per present player for that date.
-Re-locking the same date is idempotent (it replaces that date's rows).
+So playing more games — or games with fewer people — costs more. Locking writes
+one `Payments` row per present player for that date; re-locking the same date is
+idempotent (it replaces that date's rows).

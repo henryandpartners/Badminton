@@ -12,10 +12,14 @@ Worksheet "ผู้เล่น" (existing roster — READ ONLY):
     monthly fees are intentionally ignored — costs are split flat.
 
 Worksheet "Payments" (created and owned by this app):
-    | Date | Player | ShuttlesUsed | ShuttlePrice | CourtFee |
+    | Date | Player | GamesPlayed | CourtFee | ShuttleShare |
     | AmountDue | PaymentStatus |
     One row per checked-in player, per session date. The app never writes to
     the existing monthly attendance tabs or the dashboard.
+
+Cost model: each checked-in player pays a flat court fee plus a shuttle share.
+The day's shuttle cost is split across games and, within each game, shared
+equally among the players who played it.
 
 Reconciliation: players pay the organiser however they like; at end of day the
 Slip Verify tab reads each received slip's amount and matches it to who owes it.
@@ -62,12 +66,15 @@ PAYMENTS_WS = "Payments"
 PAYMENTS_COLUMNS = [
     "Date",
     "Player",
-    "ShuttlesUsed",
-    "ShuttlePrice",
+    "GamesPlayed",
     "CourtFee",
+    "ShuttleShare",
     "AmountDue",
     "PaymentStatus",
 ]
+
+# Flat court fee charged to every checked-in player (THB).
+DEFAULT_COURT_FEE_PER_PERSON = 80.0
 
 STATUS_PENDING = "Pending"
 STATUS_PAID = "Paid"
@@ -299,9 +306,10 @@ def init_state() -> None:
     ss = st.session_state
     ss.setdefault("session_date", dt.date.today())
     ss.setdefault("shuttles_used", 0)
-    ss.setdefault("court_fee", 0.0)
+    ss.setdefault("court_fee_per_person", DEFAULT_COURT_FEE_PER_PERSON)
     ss.setdefault("shuttle_price", 70.0)  # typical THB price per shuttle
     ss.setdefault("attendance", {})        # {player_name: bool}
+    ss.setdefault("games", [])             # list[list[str]] — players per game
     ss.setdefault("locked_split", None)    # cached DataFrame after locking
 
 
@@ -358,22 +366,62 @@ def view_live_tracker(players: pd.DataFrame) -> None:
 
     st.divider()
 
-    # ---- Fixed court cost -------------------------------------------------
-    st.subheader("🏟️ Court rental fee")
-    st.session_state.court_fee = st.number_input(
-        "Total court rental fee for the day (THB)",
+    # ---- Per-game player selection ---------------------------------------
+    st.subheader("🎮 Games")
+    present_names = [n for n, v in st.session_state.attendance.items() if v]
+    if not present_names:
+        st.caption("Check players in above, then add games and pick who played.")
+    else:
+        st.caption(
+            "Add a game per round and select who played. Shuttle cost is split "
+            "across the games each player joined."
+        )
+        gc_add, gc_clear = st.columns(2)
+        with gc_add:
+            if st.button("➕ Add game", use_container_width=True):
+                st.session_state.games.append([])
+        with gc_clear:
+            if st.button("🗑️ Clear games", use_container_width=True):
+                st.session_state.games = []
+
+        for gi in range(len(st.session_state.games)):
+            row = st.columns([5, 1])
+            with row[0]:
+                # Keep only still-present players as valid defaults.
+                default = [p for p in st.session_state.games[gi] if p in present_names]
+                st.session_state.games[gi] = st.multiselect(
+                    f"เกม {gi + 1} (Game {gi + 1})",
+                    options=present_names,
+                    default=default,
+                    key=f"game_{gi}",
+                )
+            with row[1]:
+                st.write("")
+                if st.button("✕", key=f"delgame_{gi}", help="Remove this game"):
+                    st.session_state.games.pop(gi)
+                    st.rerun()
+
+    st.divider()
+
+    # ---- Court fee --------------------------------------------------------
+    st.subheader("🏟️ Court fee")
+    st.session_state.court_fee_per_person = st.number_input(
+        "Court fee per checked-in person (THB)",
         min_value=0.0,
-        value=float(st.session_state.court_fee),
+        value=float(st.session_state.court_fee_per_person),
         step=10.0,
     )
 
     # ---- Running cost preview --------------------------------------------
+    n_present = len(present_names)
+    total_court = st.session_state.court_fee_per_person * n_present
     total_shuttle_cost = st.session_state.shuttles_used * st.session_state.shuttle_price
-    grand_total = total_shuttle_cost + st.session_state.court_fee
+    grand_total = total_court + total_shuttle_cost
     st.success(
         f"**Running total:** {grand_total:,.2f} THB  "
-        f"(Court {st.session_state.court_fee:,.2f} + "
-        f"Shuttles {total_shuttle_cost:,.2f})"
+        f"(Court {st.session_state.court_fee_per_person:,.0f}×{n_present} = "
+        f"{total_court:,.0f} + Shuttles {total_shuttle_cost:,.2f} across "
+        f"{len(st.session_state.games)} game(s))"
     )
 
 
@@ -383,27 +431,52 @@ def view_live_tracker(players: pd.DataFrame) -> None:
 def compute_split(players: pd.DataFrame) -> pd.DataFrame:
     """Build the per-player split DataFrame for the active session date.
 
-    Flat equal split across everyone checked in (no member/casual distinction).
+    Cost model:
+      • Court fee: a flat per-person fee charged to every checked-in player.
+      • Shuttles: total shuttle cost is split across games; within each game it
+        is shared equally among that game's players. A player's shuttle share is
+        the sum of their per-game shares. If no games are recorded, the shuttle
+        cost is split equally among all checked-in players (fallback).
     """
     present_names = [n for n, v in st.session_state.attendance.items() if v]
     count = len(present_names)
     if count == 0:
         return pd.DataFrame(columns=PAYMENTS_COLUMNS)
 
+    court_fee = float(st.session_state.court_fee_per_person)
     total_shuttle_cost = st.session_state.shuttles_used * st.session_state.shuttle_price
-    grand_total = total_shuttle_cost + st.session_state.court_fee
-    individual_due = round(grand_total / count, 2)
+
+    # Per-player shuttle "units": each game contributes 1/(players in game) to
+    # each of its players. Games with no players are ignored.
+    games = [g for g in st.session_state.games if g]
+    units = {name: 0.0 for name in present_names}
+    games_played = {name: 0 for name in present_names}
+    for g in games:
+        valid = [p for p in g if p in units]
+        if not valid:
+            continue
+        share = 1.0 / len(valid)
+        for p in valid:
+            units[p] += share
+            games_played[p] += 1
+    total_units = sum(units.values())  # equals number of non-empty games
 
     rows = []
     for name in present_names:
+        if total_units > 0:
+            shuttle_share = total_shuttle_cost * units[name] / total_units
+        else:
+            # No games recorded — fall back to an equal split.
+            shuttle_share = total_shuttle_cost / count
+        shuttle_share = round(shuttle_share, 2)
         rows.append(
             {
                 "Date": str(st.session_state.session_date),
                 "Player": name,
-                "ShuttlesUsed": st.session_state.shuttles_used,
-                "ShuttlePrice": st.session_state.shuttle_price,
-                "CourtFee": st.session_state.court_fee,
-                "AmountDue": individual_due,
+                "GamesPlayed": games_played[name],
+                "CourtFee": round(court_fee, 2),
+                "ShuttleShare": shuttle_share,
+                "AmountDue": round(court_fee + shuttle_share, 2),
                 "PaymentStatus": STATUS_PENDING,
             }
         )
@@ -418,19 +491,23 @@ def view_ledger(players: pd.DataFrame) -> None:
         st.info("No players are checked in yet. Use the **Live Tracker** first.")
         return
 
+    n_present = len(present_names)
+    n_games = len([g for g in st.session_state.games if g])
     total_shuttle_cost = st.session_state.shuttles_used * st.session_state.shuttle_price
-    grand_total = total_shuttle_cost + st.session_state.court_fee
-    individual_due = round(grand_total / len(present_names), 2)
+    total_court = st.session_state.court_fee_per_person * n_present
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Court fee", f"{st.session_state.court_fee:,.0f}")
+    m1.metric("Court (per person)", f"{st.session_state.court_fee_per_person:,.0f}")
     m2.metric("Shuttles", f"{st.session_state.shuttles_used}")
-    m3.metric("Per player", f"{individual_due:,.2f}")
+    m3.metric("Games", f"{n_games}")
 
     st.caption(
-        f"Formula: (Court {st.session_state.court_fee:,.2f} + "
-        f"{st.session_state.shuttles_used} × {st.session_state.shuttle_price:,.2f}) "
-        f"÷ {len(present_names)} players = **{individual_due:,.2f} THB each**"
+        f"Each player pays **{st.session_state.court_fee_per_person:,.0f} court** "
+        f"+ their shuttle share. Total shuttle cost "
+        f"{total_shuttle_cost:,.2f} THB is split across {n_games} game(s) "
+        f"(per-game, shared among who played). Day total: "
+        f"**{total_court + total_shuttle_cost:,.2f} THB**."
+        + ("" if n_games else "  _No games recorded — shuttles split equally._")
     )
 
     split_df = compute_split(players)
@@ -587,7 +664,7 @@ def view_history() -> None:
 
     led = ledger.copy()
     led["AmountDue"] = pd.to_numeric(led["AmountDue"], errors="coerce").fillna(0.0)
-    led["ShuttlesUsed"] = pd.to_numeric(led["ShuttlesUsed"], errors="coerce").fillna(0)
+    led["GamesPlayed"] = pd.to_numeric(led["GamesPlayed"], errors="coerce").fillna(0)
     status = led["PaymentStatus"].astype(str).str.lower()
     led["_paid"] = status.eq(STATUS_PAID.lower())
 
@@ -630,7 +707,7 @@ def view_history() -> None:
         led.groupby("Date")
         .agg(
             Players=("Player", "nunique"),
-            Shuttles=("ShuttlesUsed", "max"),
+            Games=("GamesPlayed", "max"),
             Total=("AmountDue", "sum"),
             Paid=("_paid", "sum"),
         )
