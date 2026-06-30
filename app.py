@@ -441,7 +441,109 @@ def view_live_tracker(players: pd.DataFrame) -> None:
 
 
 # =============================================================================
-# VIEW 2 — End-of-Day Split
+# VIEW 2 — Game-by-Game Recorder
+# =============================================================================
+def view_game_recorder(players: pd.DataFrame) -> None:
+    """Dedicated game recording tab. Start from Game 1, pick players, set shuttles, submit.
+    
+    Keeps a running tally of all games recorded today in session_state.
+    At the end of the day, shows the shuttle fee breakdown per player.
+    """
+    ss = st.session_state
+    ss.setdefault("recorded_games", [])
+    ss.setdefault("current_game", 1)
+
+    st.header("🎮 Game-by-Game Recorder")
+    st.caption("Record each game one at a time. Pick the players who played and how many shuttles were used.")
+
+    if players.empty:
+        st.info(f"No players found. Add names to the '{ROSTER_WS}' worksheet first.")
+        return
+
+    # Running tally of recorded games
+    if ss["recorded_games"]:
+        with st.expander(f"📋 Games recorded ({len(ss['recorded_games'])} games)", expanded=True):
+            for g in ss["recorded_games"]:
+                player_list = ", ".join(g["players"])
+                st.markdown(f"**Game {g['game']}** · {g['shuttles']} shuttle(s) · {player_list}")
+            st.divider()
+            # Shuttle fee preview
+            price = float(ss.get("shuttle_price", DEFAULT_SHUTTLE_PRICE))
+            shuttle_fees = {}
+            for g in ss["recorded_games"]:
+                cost = g["shuttles"] * price
+                per_player = cost / len(g["players"]) if g["players"] else 0
+                for p in g["players"]:
+                    shuttle_fees[p] = shuttle_fees.get(p, 0) + per_player
+            if shuttle_fees:
+                st.markdown("**🏸 Shuttle fee preview**")
+                fee_df = pd.DataFrame(
+                    [{"Player": p, "ShuttleFee": round(f, 2)} for p, f in sorted(shuttle_fees.items())]
+                )
+                st.dataframe(fee_df, use_container_width=True, hide_index=True,
+                    column_config={"ShuttleFee": st.column_config.NumberColumn(format="%.2f THB")})
+    else:
+        st.info("No games yet. Start from Game 1 below.")
+
+    st.divider()
+
+    # ---- New game form ----
+    st.subheader(f"🎯 Game {ss['current_game']}")
+
+    names = players["Name"].tolist()
+
+    selected_players = st.multiselect(
+        "Who played this game?",
+        options=names,
+        key="game_recorder_players",
+    )
+
+    col_submit, col_undo = st.columns(2)
+
+    with col_submit:
+        shuttle_count = st.number_input(
+            "Shuttles used",
+            min_value=0, max_value=20, value=1, step=1,
+            key="game_recorder_shuttles",
+        )
+        if st.button("✅ Submit Game", type="primary", use_container_width=True):
+            if not selected_players:
+                st.warning("Select at least one player!")
+            else:
+                ss["recorded_games"].append({
+                    "game": ss["current_game"],
+                    "players": list(selected_players),
+                    "shuttles": shuttle_count,
+                })
+                ss["current_game"] += 1
+                st.rerun()
+
+    with col_undo:
+        st.write("")  # spacer
+        st.write("")
+        if st.button("↩️ Undo last game", use_container_width=True):
+            if ss["recorded_games"]:
+                undone = ss["recorded_games"].pop()
+                ss["current_game"] = undone["game"]
+                st.rerun()
+
+    st.divider()
+
+    # ---- End-of-day: push games into session ----
+    if ss["recorded_games"]:
+        st.subheader("🏁 Finish Recording")
+        st.caption("Push games into the session so the **Split** tab can calculate court + shuttle costs.")
+        if st.button("📤 Push games & go to Split", type="primary", use_container_width=True):
+            ss["games"] = [{"players": g["players"], "shuttles": g["shuttles"]} for g in ss["recorded_games"]]
+            st.success(f"✅ {len(ss['recorded_games'])} game(s) pushed! Open the **🧾 Split** tab.")
+        if st.button("🗑️ Clear all", use_container_width=True):
+            ss["recorded_games"] = []
+            ss["current_game"] = 1
+            st.rerun()
+
+
+# =============================================================================
+# VIEW 3 — End-of-Day Split
 # =============================================================================
 def compute_split(players: pd.DataFrame) -> pd.DataFrame:
     """Build the per-player split DataFrame for the active session date.
@@ -755,9 +857,10 @@ def main() -> None:
 
     players = read_players()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         [
             "🏟️ Live Tracker",
+            "🎮 Games",
             "🧾 Split",
             "📥 Slip Verify",
             "👥 Roster",
@@ -767,12 +870,14 @@ def main() -> None:
     with tab1:
         view_live_tracker(players)
     with tab2:
-        view_ledger(players)
+        view_game_recorder(players)
     with tab3:
-        view_slip_verification()
+        view_ledger(players)
     with tab4:
-        view_roster(players)
+        view_slip_verification()
     with tab5:
+        view_roster(players)
+    with tab6:
         view_history()
 
     st.caption("Backed live by Google Sheets · OCR slip reading")
