@@ -255,9 +255,9 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
     # Date header row
     rows.append([f"--- {date_str} ---", "", "", "", ""])
     # Game rows
-    for g in recorded_games:
-        players_str = ", ".join(g["players"])
-        rows.append([date_str, f"Game {g['game']}", players_str, g["shuttles"], ""])
+    for i, g in enumerate(recorded_games, start=1):
+        players_str = ", ".join(g.get("players", []))
+        rows.append([date_str, f"Game {i}", players_str, g.get("shuttles", 0), ""])
     # Summary row
     rows.append(["", "Court hours", f"{total_court_hours}", f"{total_court_cost:,.0f} THB", ""])
     rows.append(["", "Shuttles total", f"{total_shuttles}", f"{total_shuttle_cost:,.0f} THB", ""])
