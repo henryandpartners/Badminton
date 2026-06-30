@@ -727,7 +727,7 @@ def view_live_tracker(players: pd.DataFrame) -> None:
     else:
         st.caption("Tap a player to flag them **Present** for today.")
         names = players["Name"].tolist()
-        cols = st.columns(2)  # two chunky columns of toggles on mobile
+        cols = st.columns(2)
         for i, name in enumerate(names):
             with cols[i % 2]:
                 st.session_state.attendance[name] = st.toggle(
@@ -738,22 +738,18 @@ def view_live_tracker(players: pd.DataFrame) -> None:
         present_count = sum(1 for v in st.session_state.attendance.values() if v)
         st.metric("Players present", present_count)
 
-        # Save attendance button — persists to shared sheet so everyone sees it.
-        if st.button("💾 Save attendance", type="secondary", use_container_width=True):
-            with st.spinner("Saving attendance to Google Sheets…"):
-                ok = save_live_checkin(
-                    st.session_state.session_date,
-                    st.session_state.attendance,
-                )
-                if ok:
-                    st.success("✅ Attendance saved — everyone can see it now!")
-                    st.rerun()
+        # Auto-save attendance to shared sheet whenever a toggle changes
+        if "attendance_snapshot" not in st.session_state:
+            st.session_state.attendance_snapshot = dict(st.session_state.attendance)
+        if st.session_state.attendance != st.session_state.attendance_snapshot:
+            save_live_checkin(st.session_state.session_date, st.session_state.attendance)
+            st.session_state.attendance_snapshot = dict(st.session_state.attendance)
 
     st.divider()
 
     # ---- Courts & hours ---------------------------------------------------
     st.subheader("🏟️ Courts & hours")
-    st.caption(f"{COURT_HOUR_RATE:,.0f} THB per hour, per court — split equally among checked-in players.")
+    st.caption("Court hours shown below for your reference. Court fee is a flat **80 THB/player**.")
     for c in COURTS:
         st.session_state.court_hours[c] = st.radio(
             f"Court {c} — hours",
@@ -763,10 +759,10 @@ def view_live_tracker(players: pd.DataFrame) -> None:
             key=f"court_{c}",
         )
     total_court_hours = sum(st.session_state.court_hours.values())
-    total_court_cost = total_court_hours * COURT_HOUR_RATE
+    present_count = sum(1 for v in st.session_state.attendance.values() if v)
+    total_court_cost = present_count * 80
     st.caption(
-        f"Court cost: {total_court_hours} court-hour(s) × {COURT_HOUR_RATE:,.0f} = "
-        f"**{total_court_cost:,.0f} THB**"
+        f"Court cost: {present_count} players × 80 THB = **{total_court_cost:,.0f} THB** (not hourly)"
     )
 
     st.divider()
@@ -797,8 +793,8 @@ def view_live_tracker(players: pd.DataFrame) -> None:
     # Quick totals preview
     if live_games:
         total_shuttle_cost = sum(g["shuttles"] for g in live_games) * st.session_state.shuttle_price
-        court_hours_total = sum(st.session_state.court_hours.values())
-        court_cost = court_hours_total * COURT_HOUR_RATE
+        present_count = sum(1 for v in st.session_state.attendance.values() if v)
+        court_cost = present_count * 80
         st.caption(
             f"Running total: 🏸 {total_shuttle_cost:.0f} THB shuttles + "
             f"🏟️ {court_cost:.0f} THB court = **{total_shuttle_cost + court_cost:.0f} THB**"
@@ -859,12 +855,11 @@ def view_live_tracker(players: pd.DataFrame) -> None:
 
     n_present = len(present_names)
     total_shuttle_cost = sum(g["shuttles"] for g in live_games) * st.session_state.shuttle_price
-    court_hours_total = sum(st.session_state.court_hours.values())
-    court_cost = court_hours_total * COURT_HOUR_RATE
+    court_cost = n_present * 80
     grand_total = court_cost + total_shuttle_cost
 
     # Preview
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Players", n_present)
     m2.metric("Court", f"{court_cost:,.0f} THB")
     m3.metric("Shuttles", f"{total_shuttle_cost:,.0f} THB")
