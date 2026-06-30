@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import re
 from typing import Optional
 
 import pandas as pd
@@ -37,14 +38,16 @@ except Exception:  # pragma: no cover - import guard
     GSheetsConnection = None  # type: ignore
 
 try:
-    import requests
-except Exception:  # pragma: no cover - import guard
-    requests = None  # type: ignore
-
-try:
     from promptpay import qrcode as promptpay_qrcode
 except Exception:  # pragma: no cover - import guard
     promptpay_qrcode = None  # type: ignore
+
+try:
+    import pytesseract
+    from PIL import Image
+except Exception:  # pragma: no cover - import guard
+    pytesseract = None  # type: ignore
+    Image = None  # type: ignore
 
 
 # =============================================================================
@@ -256,107 +259,78 @@ def generate_promptpay_qr(promptpay_id: str, amount: float) -> Optional[bytes]:
 
 
 # =============================================================================
-# Slip Matching Engine (SlipOk verification API)
+# Slip Matching Engine (local OCR — reads the amount printed on the slip)
+# -----------------------------------------------------------------------------
+# This reads the numbers printed on the uploaded slip image with Tesseract and
+# matches them against what players still owe. It does NOT verify with the bank
+# that the transfer actually happened — fine for a trusted group; swap in a
+# verification API (e.g. SlipOk) if you need fraud-proofing.
 # =============================================================================
-def verify_slip_with_slipok(image_bytes: bytes, filename: str) -> dict:
-    """POST a transfer-slip image to the SlipOk API and return a normalised dict.
+# Matches Thai-slip money tokens: 1,234.56 / 1234.56 / 100 / ฿100.00 etc.
+_AMOUNT_RE = re.compile(r"\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?")
 
-    Returns a dict shaped like:
-        {
-            "success": bool,
-            "amount": float | None,
-            "sender": str | None,
-            "raw": <full json payload or error text>,
-            "error": str | None,
-        }
 
-    Credentials are read from st.secrets["slipok"]:
-        endpoint  -> full SlipOk branch endpoint URL
-        api_key   -> the x-authorization API key
+def extract_amounts_from_image(image_bytes: bytes) -> list[float]:
+    """OCR the slip and return all plausible money amounts found, de-duplicated.
+
+    Amounts on Thai bank slips are Arabic numerals, so English OCR is enough.
+    Returns a sorted (desc) list of unique floats; empty list if none / OCR
+    unavailable.
     """
-    result = {"success": False, "amount": None, "sender": None, "raw": None, "error": None}
-
-    if requests is None:
-        result["error"] = "`requests` library not installed."
-        return result
-
-    slip_cfg = st.secrets.get("slipok", {})
-    endpoint = slip_cfg.get("endpoint")
-    api_key = slip_cfg.get("api_key")
-    if not endpoint or not api_key:
-        result["error"] = (
-            "SlipOk credentials missing. Set [slipok] endpoint and api_key "
-            "in .streamlit/secrets.toml."
+    if pytesseract is None or Image is None:
+        st.error(
+            "OCR engine not available. Ensure `pytesseract` + `Pillow` are "
+            "installed and the `tesseract-ocr` system package is present "
+            "(packages.txt on Streamlit Cloud)."
         )
-        return result
-
+        return []
     try:
-        files = {"files": (filename, image_bytes)}
-        headers = {"x-authorization": api_key}
-        # `log=true` tells SlipOk to store the verification for audit.
-        resp = requests.post(
-            endpoint,
-            headers=headers,
-            files=files,
-            data={"log": "true"},
-            timeout=30,
-        )
-        payload = {}
-        try:
-            payload = resp.json()
-        except ValueError:
-            result["error"] = f"Non-JSON response (HTTP {resp.status_code})."
-            result["raw"] = resp.text
-            return result
-
-        result["raw"] = payload
-
-        # SlipOk wraps the transaction details in `data`; `success` is top-level.
-        is_success = bool(payload.get("success", False))
-        data = payload.get("data", {}) or {}
-
-        # Different SlipOk plans expose sender under slightly different keys.
-        sender = (
-            data.get("sender", {}).get("displayName")
-            if isinstance(data.get("sender"), dict)
-            else data.get("sender")
-        ) or data.get("senderName") or data.get("sendingBank")
-
-        amount = data.get("amount")
-
-        if not is_success:
-            result["error"] = payload.get("message") or "Slip verification rejected."
-            return result
-
-        result["success"] = True
-        result["amount"] = float(amount) if amount is not None else None
-        result["sender"] = str(sender) if sender is not None else None
-        return result
-    except requests.exceptions.RequestException as exc:  # type: ignore[attr-defined]
-        result["error"] = f"Network error calling SlipOk: {exc}"
-        return result
+        img = Image.open(io.BytesIO(image_bytes))
+        text = pytesseract.image_to_string(img)
     except Exception as exc:  # pragma: no cover - runtime guard
-        result["error"] = f"Unexpected error: {exc}"
-        return result
+        st.error(f"Could not read the image: {exc}")
+        return []
+
+    amounts: set[float] = set()
+    for token in _AMOUNT_RE.findall(text):
+        cleaned = token.replace(",", "")
+        try:
+            val = float(cleaned)
+        except ValueError:
+            continue
+        # Ignore obviously-not-a-fee numbers (years, account digits, 0).
+        if 0 < val < 1_000_000:
+            amounts.add(round(val, 2))
+    return sorted(amounts, reverse=True)
 
 
-def match_slip_to_player(ledger: pd.DataFrame, amount: float, tol: float = 0.5):
-    """Find the pending ledger row whose AmountDue matches `amount`.
+def match_amounts_to_pending(ledger: pd.DataFrame, amounts: list[float], tol: float = 0.5):
+    """Return pending ledger rows whose AmountDue equals any extracted amount.
 
-    Returns (index, row) of the best match, or (None, None) if no pending player
-    owes that amount within tolerance `tol` Baht.
+    Returns a list of (index, row) tuples — usually one, but can be several if
+    multiple players owe the same amount, in which case the caller disambiguates.
     """
-    if ledger.empty or amount is None:
-        return None, None
-    pending = ledger[ledger["PaymentStatus"].astype(str).str.lower() == STATUS_PENDING.lower()]
+    if ledger.empty or not amounts:
+        return []
+    pending = ledger[
+        ledger["PaymentStatus"].astype(str).str.lower() == STATUS_PENDING.lower()
+    ]
     if pending.empty:
-        return None, None
+        return []
     due = pd.to_numeric(pending["AmountDue"], errors="coerce")
-    diffs = (due - float(amount)).abs()
-    if diffs.empty or diffs.min() > tol:
-        return None, None
-    idx = diffs.idxmin()
-    return idx, ledger.loc[idx]
+    matches = []
+    for idx, owed in due.items():
+        if pd.isna(owed):
+            continue
+        if any(abs(float(owed) - a) <= tol for a in amounts):
+            matches.append((idx, ledger.loc[idx]))
+    return matches
+
+
+def mark_player_paid(ledger: pd.DataFrame, idx) -> bool:
+    """Flip a single ledger row to Paid and write the whole ledger back."""
+    ledger.loc[idx, "PaymentStatus"] = STATUS_PAID
+    return write_ledger(ledger)
 
 
 # =============================================================================
@@ -546,12 +520,38 @@ def view_ledger(players: pd.DataFrame) -> None:
 # =============================================================================
 # VIEW 3 — Slip Verification Dashboard
 # =============================================================================
+def _manual_reconcile(ledger: pd.DataFrame, key_prefix: str) -> None:
+    """Fallback: pick a pending player and mark them Paid by hand."""
+    pending = ledger[
+        ledger["PaymentStatus"].astype(str).str.lower() == STATUS_PENDING.lower()
+    ]
+    if pending.empty:
+        st.info("No pending players to reconcile.")
+        return
+    labels = {
+        f"{r['Player']} — {float(r['AmountDue']):,.2f} THB ({r['Date']})": i
+        for i, r in pending.iterrows()
+    }
+    choice = st.selectbox(
+        "Mark a player paid manually", list(labels.keys()), key=f"{key_prefix}_sel"
+    )
+    if st.button("Mark as Paid", key=f"{key_prefix}_btn"):
+        idx = labels[choice]
+        with st.spinner("Updating Google Sheet…"):
+            if mark_player_paid(ledger, idx):
+                st.success(f"✅ {ledger.loc[idx, 'Player']} marked as Paid.")
+                st.rerun()
+
+
 def view_slip_verification() -> None:
     st.header("📥 Slip Verification")
     st.caption(
-        "Drop a bank-transfer slip. We verify it with SlipOk, match the amount "
-        "to a pending player, and mark them **Paid**."
+        "Drop a bank-transfer slip. We read the amount printed on it (OCR) and "
+        "match it to the player who owes that amount — then you **confirm** to "
+        "mark them Paid. (Reads the image only; doesn't verify with the bank.)"
     )
+
+    ledger = read_ledger()
 
     uploaded = st.file_uploader(
         "Upload transfer slip (JPG / PNG)",
@@ -559,59 +559,68 @@ def view_slip_verification() -> None:
         accept_multiple_files=False,
     )
 
-    if uploaded is None:
-        # Show the current outstanding list so the user has context.
-        ledger = read_ledger()
-        if not ledger.empty:
-            today = str(st.session_state.session_date)
-            todays = ledger[ledger["Date"].astype(str) == today]
-            if not todays.empty:
-                st.subheader("Today's payment status")
-                st.dataframe(
-                    todays[["Player", "AmountDue", "PaymentStatus"]],
-                    use_container_width=True,
-                    hide_index=True,
+    if uploaded is not None:
+        st.image(uploaded, caption="Uploaded slip", width=220)
+        if st.button("🔍 Read slip & match", type="primary"):
+            with st.spinner("Reading slip with OCR…"):
+                st.session_state["slip_amounts"] = extract_amounts_from_image(
+                    uploaded.getvalue()
                 )
-        return
 
-    st.image(uploaded, caption="Uploaded slip", width=220)
+        amounts = st.session_state.get("slip_amounts")
+        if amounts is not None:
+            if not amounts:
+                st.warning(
+                    "Couldn't read any amount from this slip. Try a clearer photo, "
+                    "or reconcile manually below."
+                )
+            else:
+                st.caption(
+                    "Amounts read from slip: "
+                    + ", ".join(f"{a:,.2f}" for a in amounts)
+                )
+                matches = match_amounts_to_pending(ledger, amounts)
+                if not matches:
+                    st.warning(
+                        "No pending player owes any amount found on this slip. "
+                        "Reconcile manually below."
+                    )
+                else:
+                    st.success(
+                        f"Matched {len(matches)} pending player(s). "
+                        "Confirm to mark Paid:"
+                    )
+                    for idx, row in matches:
+                        with st.container(border=True):
+                            cols = st.columns([3, 2])
+                            cols[0].markdown(
+                                f"**{row['Player']}** — "
+                                f"{float(row['AmountDue']):,.2f} THB ({row['Date']})"
+                            )
+                            if cols[1].button("✅ Confirm Paid", key=f"confirm_{idx}"):
+                                with st.spinner("Updating Google Sheet…"):
+                                    if mark_player_paid(ledger, idx):
+                                        st.success(f"{row['Player']} marked as Paid!")
+                                        st.balloons()
+                                        st.session_state.pop("slip_amounts", None)
+                                        st.rerun()
 
-    if st.button("🔍 Verify & reconcile", type="primary"):
-        image_bytes = uploaded.getvalue()
-        with st.spinner("Verifying slip with SlipOk…"):
-            verdict = verify_slip_with_slipok(image_bytes, uploaded.name)
+    st.divider()
 
-        if not verdict["success"]:
-            st.error(f"Slip not verified: {verdict.get('error')}")
-            with st.expander("Raw response"):
-                st.write(verdict.get("raw"))
-            return
-
-        amount = verdict["amount"]
-        sender = verdict["sender"]
-        st.info(
-            f"Verified transfer of **{amount:,.2f} THB**"
-            + (f" from **{sender}**." if sender else ".")
-        )
-
-        ledger = read_ledger()
-        idx, match = match_slip_to_player(ledger, amount)
-        if idx is None:
-            st.warning(
-                f"No pending player owes {amount:,.2f} THB. "
-                "Reconcile manually or check the ledger."
+    # Always-visible context: today's payment status.
+    if not ledger.empty:
+        today = str(st.session_state.session_date)
+        todays = ledger[ledger["Date"].astype(str) == today]
+        if not todays.empty:
+            st.subheader("Today's payment status")
+            st.dataframe(
+                todays[["Player", "AmountDue", "PaymentStatus"]],
+                use_container_width=True,
+                hide_index=True,
             )
-            return
 
-        # ---- Update that player's row to Paid and write back ------------
-        ledger.loc[idx, "PaymentStatus"] = STATUS_PAID
-        with st.spinner("Updating Google Sheet…"):
-            if write_ledger(ledger):
-                st.success(
-                    f"✅ Matched **{amount:,.2f} THB** to "
-                    f"**{match['Player']}** — marked as Paid!"
-                )
-                st.balloons()
+    with st.expander("✋ Manual reconcile"):
+        _manual_reconcile(ledger, "manual")
 
 
 # =============================================================================
@@ -771,7 +780,7 @@ def main() -> None:
     with tab5:
         view_history()
 
-    st.caption("Backed live by Google Sheets · PromptPay · SlipOk")
+    st.caption("Backed live by Google Sheets · PromptPay · OCR slip reading")
 
 
 if __name__ == "__main__":
