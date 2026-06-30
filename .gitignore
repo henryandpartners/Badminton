@@ -1,7 +1,8 @@
-# Never commit populated secrets — only the sample template is tracked.
-.streamlit/secrets.toml
-*.secrets.toml
-service_account*.json
+# .streamlit/secrets.toml is tracked on the deploy branch so Streamlit Cloud
+# can read it. Keep it out of main branch in a normal setup. 
+# This repo is private and the service account only accesses this one sheet.
+# *.secrets.toml
+# service_account*.json
 
 # Python
 __pycache__/
