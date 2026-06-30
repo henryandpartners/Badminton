@@ -123,7 +123,15 @@ def get_connection():
             "Add it to requirements.txt and redeploy."
         )
         st.stop()
-    return st.connection("gsheets", type=GSheetsConnection)
+    try:
+        return st.connection("gsheets", type=GSheetsConnection)
+    except Exception as exc:
+        st.error(
+            "Could not establish the Google Sheets connection. Check that "
+            "`[connections.gsheets]` in your secrets is filled in with a valid "
+            f"service-account key.\n\nDetails: {exc}"
+        )
+        st.stop()
 
 
 def read_players() -> pd.DataFrame:
@@ -147,6 +155,26 @@ def read_players() -> pd.DataFrame:
     except Exception as exc:  # pragma: no cover - network/runtime guard
         st.error(f"Could not read the '{PLAYERS_WS}' worksheet: {exc}")
         return pd.DataFrame(columns=["Name", "PromptPayID"])
+
+
+def write_players(df: pd.DataFrame) -> bool:
+    """Overwrite the Players worksheet with `df`. Returns True on success."""
+    conn = get_connection()
+    try:
+        clean = df.copy()
+        # Keep only the canonical columns, in order.
+        for col in ["Name", "PromptPayID"]:
+            if col not in clean.columns:
+                clean[col] = ""
+        clean = clean[["Name", "PromptPayID"]]
+        clean["Name"] = clean["Name"].astype(str).str.strip()
+        clean["PromptPayID"] = clean["PromptPayID"].fillna("").astype(str).str.strip()
+        clean = clean[clean["Name"] != ""].reset_index(drop=True)
+        conn.update(worksheet=PLAYERS_WS, data=clean)
+        return True
+    except Exception as exc:  # pragma: no cover - network/runtime guard
+        st.error(f"Failed to write to the '{PLAYERS_WS}' worksheet: {exc}")
+        return False
 
 
 def read_ledger() -> pd.DataFrame:
@@ -587,6 +615,132 @@ def view_slip_verification() -> None:
 
 
 # =============================================================================
+# VIEW 4 — Roster Manager
+# =============================================================================
+def view_roster(players: pd.DataFrame) -> None:
+    st.header("👥 Roster Manager")
+    st.caption(
+        "Add, rename or remove players and edit their PromptPay IDs, then save "
+        f"back to the '{PLAYERS_WS}' worksheet."
+    )
+
+    base = players.copy()
+    if base.empty:
+        base = pd.DataFrame(columns=["Name", "PromptPayID"])
+
+    edited = st.data_editor(
+        base[["Name", "PromptPayID"]],
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Name": st.column_config.TextColumn("Name", required=True),
+            "PromptPayID": st.column_config.TextColumn(
+                "PromptPay ID",
+                help="Thai mobile number (0812345678) or 13-digit national/tax ID",
+            ),
+        },
+        key="roster_editor",
+    )
+
+    # Basic validation feedback before the user commits.
+    names = edited["Name"].astype(str).str.strip()
+    dupes = names[names.duplicated() & (names != "")].unique().tolist()
+    if dupes:
+        st.warning(f"Duplicate player names will be merged on save: {', '.join(dupes)}")
+
+    if st.button("💾 Save roster to Google Sheet", type="primary"):
+        with st.spinner("Saving roster…"):
+            # Drop duplicate names (keep first) to keep attendance keys unique.
+            to_save = edited.copy()
+            to_save["Name"] = to_save["Name"].astype(str).str.strip()
+            to_save = to_save[to_save["Name"] != ""].drop_duplicates(
+                subset=["Name"], keep="first"
+            )
+            if write_players(to_save):
+                st.success(f"Saved {len(to_save)} players. ✅")
+                st.rerun()
+
+
+# =============================================================================
+# VIEW 5 — Season History
+# =============================================================================
+def view_history() -> None:
+    st.header("📊 Season History")
+    ledger = read_ledger()
+    if ledger.empty:
+        st.info("No sessions recorded yet. Lock a ledger to start building history.")
+        return
+
+    led = ledger.copy()
+    led["AmountDue"] = pd.to_numeric(led["AmountDue"], errors="coerce").fillna(0.0)
+    led["ShuttlesUsed"] = pd.to_numeric(led["ShuttlesUsed"], errors="coerce").fillna(0)
+    status = led["PaymentStatus"].astype(str).str.lower()
+    led["_paid"] = status.eq(STATUS_PAID.lower())
+
+    # ---- Top-line season metrics -----------------------------------------
+    total_collected = led.loc[led["_paid"], "AmountDue"].sum()
+    total_outstanding = led.loc[~led["_paid"], "AmountDue"].sum()
+    n_sessions = led["Date"].astype(str).nunique()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Sessions", n_sessions)
+    m2.metric("Collected", f"{total_collected:,.0f}")
+    m3.metric("Outstanding", f"{total_outstanding:,.0f}")
+
+    # ---- Per-player summary ----------------------------------------------
+    st.subheader("Per player")
+    per_player = (
+        led.groupby("Player")
+        .agg(
+            Sessions=("Date", "nunique"),
+            TotalDue=("AmountDue", "sum"),
+            Paid=("AmountDue", lambda s: s[led.loc[s.index, "_paid"]].sum()),
+        )
+        .reset_index()
+    )
+    per_player["Outstanding"] = per_player["TotalDue"] - per_player["Paid"]
+    per_player = per_player.sort_values("Outstanding", ascending=False)
+    st.dataframe(
+        per_player,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "TotalDue": st.column_config.NumberColumn(format="%.2f"),
+            "Paid": st.column_config.NumberColumn(format="%.2f"),
+            "Outstanding": st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
+
+    # ---- Per-session summary ---------------------------------------------
+    st.subheader("Per session")
+    per_session = (
+        led.groupby("Date")
+        .agg(
+            Players=("Player", "nunique"),
+            Shuttles=("ShuttlesUsed", "max"),
+            Total=("AmountDue", "sum"),
+            Paid=("_paid", "sum"),
+        )
+        .reset_index()
+        .sort_values("Date", ascending=False)
+    )
+    st.dataframe(
+        per_session,
+        use_container_width=True,
+        hide_index=True,
+        column_config={"Total": st.column_config.NumberColumn(format="%.2f")},
+    )
+
+    # ---- Outstanding-by-player chart -------------------------------------
+    chart_data = per_player[per_player["Outstanding"] > 0].set_index("Player")[
+        ["Outstanding"]
+    ]
+    if not chart_data.empty:
+        st.subheader("Who still owes")
+        st.bar_chart(chart_data)
+
+
+# =============================================================================
 # Main
 # =============================================================================
 def main() -> None:
@@ -597,8 +751,14 @@ def main() -> None:
 
     players = read_players()
 
-    tab1, tab2, tab3 = st.tabs(
-        ["🏟️ Live Tracker", "🧾 Ledger & QR", "📥 Slip Verify"]
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        [
+            "🏟️ Live Tracker",
+            "🧾 Ledger & QR",
+            "📥 Slip Verify",
+            "👥 Roster",
+            "📊 History",
+        ]
     )
     with tab1:
         view_live_tracker(players)
@@ -606,6 +766,10 @@ def main() -> None:
         view_ledger(players)
     with tab3:
         view_slip_verification()
+    with tab4:
+        view_roster(players)
+    with tab5:
+        view_history()
 
     st.caption("Backed live by Google Sheets · PromptPay · SlipOk")
 

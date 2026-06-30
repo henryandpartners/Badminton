@@ -1,5 +1,6 @@
 # --- Core app ---------------------------------------------------------------
-streamlit>=1.36.0
+# Pinned to the range this app was tested against (verified on 1.58.0).
+streamlit>=1.40.0,<1.59.0
 
 # --- Google Sheets live backend (st.connection("gsheets", ...)) -------------
 st-gsheets-connection>=0.0.4
