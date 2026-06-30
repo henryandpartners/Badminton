@@ -11,11 +11,8 @@ google-auth>=2.30.0
 # --- Data handling ----------------------------------------------------------
 pandas>=2.0.0
 
-# --- PromptPay QR generation ------------------------------------------------
-promptpay>=0.4.0
-Pillow>=10.0.0
-
 # --- Slip reading (local OCR) -----------------------------------------------
 # Requires the `tesseract-ocr` system binary too — see packages.txt
 # (Streamlit Community Cloud installs it from that file automatically).
 pytesseract>=0.3.10
+Pillow>=10.0.0

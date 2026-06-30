@@ -2,9 +2,9 @@
 
 A mobile-optimised **Streamlit** web app for tracking on-court badminton
 sessions. It uses a **Google Sheet as the live backend** (read/write via
-`st-gsheets-connection`), generates **PromptPay QR codes** for collecting
-payment, and reconciles **bank-transfer slips** by reading the amount off the
-photo with **local OCR (Tesseract)** — no third-party API or keys required.
+`st-gsheets-connection`), splits each session's cost, and reconciles
+**bank-transfer slips** by reading the amount off the photo with **local OCR
+(Tesseract)** — no third-party API or keys required.
 
 Designed thumb-first: big high-contrast buttons and toggle chips that work on a
 phone browser court-side.
@@ -16,7 +16,7 @@ phone browser court-side.
 | View | What it does |
 |------|--------------|
 | 🏟️ **Live Tracker** | Toggle player attendance, giant ➕/➖ shuttle counter, court-fee input, live running total. |
-| 🧾 **Ledger & QR** | Splits the bill `(Court Fee + Shuttles × Price) ÷ players present`, writes each player's row to the `Payments` tab, and renders a PromptPay QR (collector account + exact amount). |
+| 🧾 **Split** | Splits the bill `(Court Fee + Shuttles × Price) ÷ players present` and writes each player's row to the `Payments` tab. |
 | 📥 **Slip Verify** | Drag-and-drop a JPG/PNG slip → OCR reads the amount → it's matched to the player who owes it → you confirm → their row flips `Pending → Paid`. Includes a manual-reconcile fallback. |
 | 👥 **Roster** | Read-only list of players, read live from the `ผู้เล่น` worksheet. |
 | 📊 **History** | Per-player and per-session summaries + outstanding-balance chart from the `Payments` tab. |
@@ -39,8 +39,7 @@ The app works against an existing Thai badminton sheet:
 The app **never** writes to the existing monthly attendance tabs or the
 dashboard — only to its own `Payments` tab.
 
-> Share the Sheet with your service account's `client_email` (Editor access),
-> and set the collector account under `[promptpay]` in secrets.
+> Share the Sheet with your service account's `client_email` (Editor access).
 
 ---
 

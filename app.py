@@ -2,8 +2,8 @@
 🏸 Badminton Team Tracker
 =========================
 A mobile-optimised Streamlit frontend for tracking on-court badminton sessions,
-splitting costs, generating PromptPay QR codes, and reconciling bank-transfer
-slips against players — all backed live by a Google Sheet.
+splitting costs, and reconciling bank-transfer slips against players by reading
+the received amount — all backed live by a Google Sheet.
 
 Backend schema (Google Sheet)
 -----------------------------
@@ -17,9 +17,8 @@ Worksheet "Payments" (created and owned by this app):
     One row per checked-in player, per session date. The app never writes to
     the existing monthly attendance tabs or the dashboard.
 
-Payments collect into a single PromptPay account configured in secrets:
-    [promptpay]
-    id = "0812345678"   # the organiser's number / ID that receives transfers
+Reconciliation: players pay the organiser however they like; at end of day the
+Slip Verify tab reads each received slip's amount and matches it to who owes it.
 
 Run with:  streamlit run app.py
 """
@@ -29,7 +28,6 @@ from __future__ import annotations
 import datetime as dt
 import io
 import re
-from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -40,11 +38,6 @@ try:
     from streamlit_gsheets import GSheetsConnection
 except Exception:  # pragma: no cover - import guard
     GSheetsConnection = None  # type: ignore
-
-try:
-    from promptpay import qrcode as promptpay_qrcode
-except Exception:  # pragma: no cover - import guard
-    promptpay_qrcode = None  # type: ignore
 
 try:
     import pytesseract
@@ -225,47 +218,6 @@ def upsert_session_rows(session_rows: pd.DataFrame) -> bool:
 
 
 # =============================================================================
-# PromptPay QR generation
-# =============================================================================
-def get_collector_promptpay() -> str:
-    """The single account that collects payments, from st.secrets['promptpay'].
-
-    Everyone pays into the same organiser account, so we encode that one ID in
-    every QR (with each player's amount). Returns '' if not configured.
-    """
-    cfg = st.secrets.get("promptpay", {}) if hasattr(st, "secrets") else {}
-    return str(cfg.get("id", "")).strip()
-
-
-def generate_promptpay_qr(promptpay_id: str, amount: float) -> Optional[bytes]:
-    """Return PNG bytes of a PromptPay QR encoding `amount` for `promptpay_id`.
-
-    Uses the `promptpay` library to build the EMVCo payload, then renders it to
-    a PNG. Returns None (and surfaces a message) if generation fails.
-    """
-    if promptpay_qrcode is None:
-        st.error("`promptpay` library not installed — cannot generate QR codes.")
-        return None
-    if not promptpay_id:
-        st.warning(
-            "No collector PromptPay account configured. Set [promptpay] id in "
-            "your secrets (the account that receives payments)."
-        )
-        return None
-    try:
-        payload = promptpay_qrcode.generate_payload(
-            str(promptpay_id), amount=round(float(amount), 2)
-        )
-        img = promptpay_qrcode.to_image(payload)  # PIL.Image
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
-    except Exception as exc:  # pragma: no cover - runtime guard
-        st.error(f"QR generation failed: {exc}")
-        return None
-
-
-# =============================================================================
 # Slip Matching Engine (local OCR — reads the amount printed on the slip)
 # -----------------------------------------------------------------------------
 # This reads the numbers printed on the uploaded slip image with Tesseract and
@@ -426,7 +378,7 @@ def view_live_tracker(players: pd.DataFrame) -> None:
 
 
 # =============================================================================
-# VIEW 2 — End-of-Day Ledger & PromptPay QR
+# VIEW 2 — End-of-Day Split
 # =============================================================================
 def compute_split(players: pd.DataFrame) -> pd.DataFrame:
     """Build the per-player split DataFrame for the active session date.
@@ -459,7 +411,7 @@ def compute_split(players: pd.DataFrame) -> pd.DataFrame:
 
 
 def view_ledger(players: pd.DataFrame) -> None:
-    st.header("🧾 End-of-Day Ledger")
+    st.header("🧾 End-of-Day Split")
 
     present_names = [n for n, v in st.session_state.attendance.items() if v]
     if not present_names:
@@ -494,35 +446,10 @@ def view_ledger(players: pd.DataFrame) -> None:
                 st.success("Saved to the Payments tab. ✅")
                 st.balloons()
 
-    st.divider()
-
-    # ---- PromptPay QR per player -----------------------------------------
-    collector = get_collector_promptpay()
-    st.subheader("📱 PromptPay QR codes")
-    if collector:
-        st.caption(
-            f"Each player scans to pay their exact amount into the collector "
-            f"account ({collector})."
-        )
-    else:
-        st.warning(
-            "Set [promptpay] id in your secrets (the account that receives "
-            "payments) to enable QR codes."
-        )
-    for _, row in split_df.iterrows():
-        with st.container(border=True):
-            top = st.columns([2, 1])
-            top[0].markdown(f"**{row['Player']}**")
-            top[1].markdown(f"**{row['AmountDue']:,.2f} THB**")
-            if st.button(f"Show QR — {row['Player']}", key=f"qr_{row['Player']}"):
-                png = generate_promptpay_qr(collector, row["AmountDue"])
-                if png:
-                    st.image(
-                        png,
-                        caption=f"{row['Player']} · {row['AmountDue']:,.2f} THB "
-                        f"→ {collector}",
-                        width=260,
-                    )
+    st.caption(
+        "Collect payments as usual, then reconcile in the **Slip Verify** tab — "
+        "upload the slips you received and they're matched to who owes that amount."
+    )
 
 
 # =============================================================================
@@ -740,7 +667,7 @@ def main() -> None:
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
             "🏟️ Live Tracker",
-            "🧾 Ledger & QR",
+            "🧾 Split",
             "📥 Slip Verify",
             "👥 Roster",
             "📊 History",
@@ -757,7 +684,7 @@ def main() -> None:
     with tab5:
         view_history()
 
-    st.caption("Backed live by Google Sheets · PromptPay · OCR slip reading")
+    st.caption("Backed live by Google Sheets · OCR slip reading")
 
 
 if __name__ == "__main__":
