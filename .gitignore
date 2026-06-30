@@ -1,0 +1,17 @@
+# Never commit populated secrets — only the sample template is tracked.
+.streamlit/secrets.toml
+*.secrets.toml
+service_account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
