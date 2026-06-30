@@ -219,59 +219,64 @@ MONTH_TABS = {
     10: "2026-10", 11: "2026-11", 12: "2026-12",
 }
 
-# Tab where game logs are saved
-GAME_LOG_WS = "GameLog"
-
 
 def get_month_tab(date: dt.date) -> str:
     """Return the worksheet name for the given date's month."""
     return MONTH_TABS.get(date.month, f"{date.year}-{date.month:02d}")
 
 
-def append_game_log(recorded_games: list, session_date: dt.date) -> bool:
-    """Write today's game log as new rows in the GameLog tab.
+def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours: dict,
+                        attendance: dict, shuttle_price: float) -> bool:
+    """Submit the entire day's record to the correct monthly tab under today's date.
 
-    Each game gets a row: Date, Game#, Players, Shuttles, ShuttleFee.
-    Appends after existing data.
+    Writes a date header row, then game rows with players + shuttles, then a
+    summary row with court cost and shuttle fees. Appends after existing data
+    in the monthly tab (e.g. 2026-07 for July).
     """
     conn = get_connection()
+    tab = get_month_tab(session_date)
     date_str = session_date.isoformat()
-    price = float(st.session_state.get("shuttle_price", DEFAULT_SHUTTLE_PRICE))
+    price = shuttle_price
 
-    # Build rows
+    # Count present players
+    present = [n for n, v in attendance.items() if v]
+    n_present = len(present)
+
+    # Court cost (total, not split)
+    total_court_hours = sum(court_hours.values())
+    total_court_cost = total_court_hours * COURT_HOUR_RATE
+
+    # Shuttle totals
+    total_shuttles = sum(g["shuttles"] for g in recorded_games)
+    total_shuttle_cost = total_shuttles * price
+
+    # Build rows to append: header + each game + summary
     rows = []
+    # Date header row
+    rows.append([f"--- {date_str} ---", "", "", "", ""])
+    # Game rows
     for g in recorded_games:
-        cost = g["shuttles"] * price
-        per_player = round(cost / len(g["players"]), 2) if g["players"] else 0
-        rows.append([
-            date_str,
-            f"Game {g['game']}",
-            ", ".join(g["players"]),
-            g["shuttles"],
-            per_player,
-        ])
+        players_str = ", ".join(g["players"])
+        rows.append([date_str, f"Game {g['game']}", players_str, g["shuttles"], ""])
+    # Summary row
+    rows.append(["", "Court hours", f"{total_court_hours}", f"{total_court_cost:,.0f} THB", ""])
+    rows.append(["", "Shuttles total", f"{total_shuttles}", f"{total_shuttle_cost:,.0f} THB", ""])
+    rows.append(["", "Players present", f"{n_present}", "", ""])
+    rows.append(["", "", "", "", ""])  # blank separator
 
     try:
-        existing = conn.read(worksheet=GAME_LOG_WS, ttl=0)
+        existing = conn.read(worksheet=tab, ttl=0)
         if existing is not None and not existing.empty:
             existing = existing.dropna(how="all")
-            start_row = len(existing) + 2  # header row + data rows
+            start_row = len(existing) + 2
         else:
-            header = [["Date", "Game", "Players", "Shuttles", "Fee/Player"]]
-            conn.update(worksheet=GAME_LOG_WS, data=header)
-            start_row = 2
+            start_row = 1
 
-        conn.update(worksheet=GAME_LOG_WS, data=rows, cell=f"A{start_row}")
+        conn.update(worksheet=tab, data=rows, cell=f"A{start_row}")
         return True
     except Exception as exc:
-        try:
-            header = [["Date", "Game", "Players", "Shuttles", "Fee/Player"]]
-            conn.update(worksheet=GAME_LOG_WS, data=header)
-            conn.update(worksheet=GAME_LOG_WS, data=rows, cell="A2")
-            return True
-        except Exception as exc2:
-            st.error(f"Could not write to '{GAME_LOG_WS}' tab: {exc2}")
-            return False
+        st.error(f"Could not write to tab '{tab}': {exc}")
+        return False
 
 
 def upsert_session_rows(session_rows: pd.DataFrame) -> bool:
@@ -377,8 +382,7 @@ def init_state() -> None:
     ss.setdefault("attendance", {})        # {player_name: bool}
     ss.setdefault("court_hours", {c: 0 for c in COURTS})  # {court: hours}
     # games: list of {"players": [names], "shuttles": int}
-    ss.setdefault("games", [])
-    ss.setdefault("locked_split", None)    # cached DataFrame after locking
+    ss.setdefault("games", [])  # list of {"players": [names], "shuttles": int}
 
 
 # =============================================================================
@@ -489,137 +493,46 @@ def view_live_tracker(players: pd.DataFrame) -> None:
                         f"÷ {np_} = **{per:,.2f} THB each**"
                     )
 
-    # ---- Running cost preview --------------------------------------------
+    # ---- End of day: submit to sheet ---------------------------------------
+    st.divider()
+    st.subheader("📤 End of Day · Submit to Sheet")
+
+    present_names = [n for n, v in st.session_state.attendance.items() if v]
     n_present = len(present_names)
     total_shuttle_cost = sum(
         g.get("shuttles", 0) for g in st.session_state.games
     ) * st.session_state.shuttle_price
     grand_total = total_court_cost + total_shuttle_cost
-    st.success(
-        f"**Day total:** {grand_total:,.2f} THB  "
-        f"(Court {total_court_cost:,.0f} + Shuttles {total_shuttle_cost:,.0f} "
-        f"across {len([g for g in st.session_state.games if g.get('players')])} game(s), "
-        f"{n_present} player(s) present)"
+
+    # Preview
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Players", n_present)
+    m2.metric("Court", f"{total_court_cost:,.0f} THB")
+    m3.metric("Shuttles", f"{total_shuttle_cost:,.0f} THB")
+    m4.metric("Total", f"{grand_total:,.0f} THB")
+
+    st.caption(
+        f"Submits to the **{get_month_tab(st.session_state.session_date)}** tab "
+        f"under date **{st.session_state.session_date}**."
+        " All games, court hours, and totals will be saved."
     )
+
+    if st.button("📥 Submit day", type="primary", use_container_width=True):
+        with st.spinner("Saving to Google Sheets…"):
+            tab = get_month_tab(st.session_state.session_date)
+            ok = submit_day_to_sheet(
+                recorded_games=st.session_state.games,
+                session_date=st.session_state.session_date,
+                court_hours=st.session_state.court_hours,
+                attendance=st.session_state.attendance,
+                shuttle_price=float(st.session_state.shuttle_price),
+            )
+            if ok:
+                st.success(f"✅ Day saved to '{tab}' under {st.session_state.session_date}!")
+                st.balloons()
 
 
 # =============================================================================
-# VIEW 2 — Game-by-Game Recorder
-# =============================================================================
-def view_game_recorder(players: pd.DataFrame) -> None:
-    """Dedicated game recording tab. Start from Game 1, pick players, set shuttles, submit.
-    
-    Keeps a running tally of all games recorded today in session_state.
-    At the end of the day, shows the shuttle fee breakdown per player.
-    """
-    ss = st.session_state
-    ss.setdefault("recorded_games", [])
-    ss.setdefault("current_game", 1)
-
-    st.header("🎮 Game-by-Game Recorder")
-    st.caption("Record each game one at a time. Pick the players who played and how many shuttles were used.")
-
-    if players.empty:
-        st.info(f"No players found. Add names to the '{ROSTER_WS}' worksheet first.")
-        return
-
-    # Running tally of recorded games
-    if ss["recorded_games"]:
-        with st.expander(f"📋 Games recorded ({len(ss['recorded_games'])} games)", expanded=True):
-            for g in ss["recorded_games"]:
-                player_list = ", ".join(g["players"])
-                st.markdown(f"**Game {g['game']}** · {g['shuttles']} shuttle(s) · {player_list}")
-            st.divider()
-            # Shuttle fee preview
-            price = float(ss.get("shuttle_price", DEFAULT_SHUTTLE_PRICE))
-            shuttle_fees = {}
-            for g in ss["recorded_games"]:
-                cost = g["shuttles"] * price
-                per_player = cost / len(g["players"]) if g["players"] else 0
-                for p in g["players"]:
-                    shuttle_fees[p] = shuttle_fees.get(p, 0) + per_player
-            if shuttle_fees:
-                st.markdown("**🏸 Shuttle fee preview**")
-                fee_df = pd.DataFrame(
-                    [{"Player": p, "ShuttleFee": round(f, 2)} for p, f in sorted(shuttle_fees.items())]
-                )
-                st.dataframe(fee_df, use_container_width=True, hide_index=True,
-                    column_config={"ShuttleFee": st.column_config.NumberColumn(format="%.2f THB")})
-    else:
-        st.info("No games yet. Start from Game 1 below.")
-
-    st.divider()
-
-    # ---- New game form ----
-    st.subheader(f"🎯 Game {ss['current_game']}")
-
-    names = players["Name"].tolist()
-
-    selected_players = st.multiselect(
-        "Who played this game?",
-        options=names,
-        key="game_recorder_players",
-    )
-
-    col_submit, col_undo = st.columns(2)
-
-    with col_submit:
-        shuttle_count = st.number_input(
-            "Shuttles used",
-            min_value=0, max_value=20, value=1, step=1,
-            key="game_recorder_shuttles",
-        )
-        if st.button("✅ Submit Game", type="primary", use_container_width=True):
-            if not selected_players:
-                st.warning("Select at least one player!")
-            else:
-                ss["recorded_games"].append({
-                    "game": ss["current_game"],
-                    "players": list(selected_players),
-                    "shuttles": shuttle_count,
-                })
-                ss["current_game"] += 1
-                st.rerun()
-
-    with col_undo:
-        st.write("")  # spacer
-        st.write("")
-        if st.button("↩️ Undo last game", use_container_width=True):
-            if ss["recorded_games"]:
-                undone = ss["recorded_games"].pop()
-                ss["current_game"] = undone["game"]
-                st.rerun()
-
-    st.divider()
-
-    # ---- Save to monthly sheet ----
-    if ss["recorded_games"]:
-        st.subheader("💾 Save to Sheet")
-        st.caption(
-            f"Save all {len(ss['recorded_games'])} game(s) to the **{GAME_LOG_WS}** tab "
-            f"under date **{ss['session_date']}**."
-        )
-
-        col_save, col_push, col_clear = st.columns(3)
-
-        with col_save:
-            if st.button("💾 Save games to Sheet", type="primary", use_container_width=True):
-                with st.spinner("Writing to Google Sheets…"):
-                    if append_game_log(ss["recorded_games"], ss["session_date"]):
-                        st.success(f"✅ {len(ss['recorded_games'])} game(s) saved to '{GAME_LOG_WS}'!")
-                        st.balloons()
-
-        with col_push:
-            if st.button("📤 Push to Split", use_container_width=True):
-                ss["games"] = [{"players": g["players"], "shuttles": g["shuttles"]} for g in ss["recorded_games"]]
-                st.success(f"✅ {len(ss['recorded_games'])} game(s) pushed! Open the **🧾 Split** tab.")
-
-        with col_clear:
-            if st.button("🗑️ Clear all", use_container_width=True):
-                ss["recorded_games"] = []
-                ss["current_game"] = 1
-                st.rerun()
-
 
 # =============================================================================
 # VIEW 3 — End-of-Day Split
@@ -936,10 +849,9 @@ def main() -> None:
 
     players = read_players()
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
             "🏟️ Live Tracker",
-            "🎮 Games",
             "🧾 Split",
             "📥 Slip Verify",
             "👥 Roster",
@@ -949,14 +861,12 @@ def main() -> None:
     with tab1:
         view_live_tracker(players)
     with tab2:
-        view_game_recorder(players)
-    with tab3:
         view_ledger(players)
-    with tab4:
+    with tab3:
         view_slip_verification()
-    with tab5:
+    with tab4:
         view_roster(players)
-    with tab6:
+    with tab5:
         view_history()
 
     st.caption("Backed live by Google Sheets · OCR slip reading")
