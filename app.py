@@ -35,6 +35,7 @@ import datetime as dt
 import io
 import re
 
+import gspread
 import pandas as pd
 import streamlit as st
 
@@ -151,6 +152,30 @@ def get_connection():
         st.stop()
 
 
+@st.cache_resource(show_spinner=False)
+def _get_gspread_worksheet(worksheet_name: str):
+    """Get a raw ``gspread.Worksheet`` object for row-level operations.
+
+    ``GSheetsConnection.update()`` **clears and rewrites** the entire worksheet
+    — there is no ``cell`` parameter.  For operations like ``append_row()`` and
+    ``delete_rows()`` we need the underlying ``gspread`` worksheet directly.
+
+    Builds a ``gspread`` client from the same service-account key that
+    ``st.connection("gsheets")`` uses, so permissions are identical.
+    """
+    try:
+        sa_info = dict(st.secrets["connections"]["gsheets"])
+        spreadsheet_url = sa_info.pop("spreadsheet", None)
+        worksheet_name_fallback = sa_info.pop("worksheet", None)
+        gc = gspread.service_account_from_dict(sa_info)
+
+        sh = gc.open_by_url(spreadsheet_url) if spreadsheet_url else gc.open("Badminton Tracker")
+        return sh.worksheet(worksheet_name)
+    except Exception as exc:
+        st.error(f"Could not access worksheet '{worksheet_name}': {exc}")
+        raise
+
+
 def read_players() -> pd.DataFrame:
     """Read the player roster from the Thai 'ผู้เล่น' worksheet.
 
@@ -230,6 +255,82 @@ LIVE_GAMES_WS = "LiveGames"
 
 GAME_LOG_COLUMNS = ["Date", "GameNum", "Players", "Shuttles", "AddedBy"]
 
+# ── Live check-in (attendance, shared across all users) ──────────────────
+LIVE_CHECKIN_WS = "LiveCheckin"
+
+
+def read_live_checkin(session_date: dt.date) -> dict[str, bool]:
+    """Read today's attendance from the ``LiveCheckin`` worksheet.
+
+    Returns ``{player_name: True}`` for every player listed in today's row.
+    Returns an empty dict if no check-in row exists for *session_date*.
+    """
+    conn = get_connection()
+    date_str = session_date.isoformat()
+    try:
+        df = conn.read(worksheet=LIVE_CHECKIN_WS, ttl=0)
+        if df is None or df.empty:
+            return {}
+        df = df.dropna(how="all")
+        # First column is the date; subsequent columns are player names.
+        if df.columns[0] == "Date" or "Date" in str(df.columns[0]):
+            col = df.iloc[:, 0].astype(str).str.strip()
+            mask = col == date_str
+            if not mask.any():
+                return {}
+            row = df[mask].iloc[0]
+            players = [str(v).strip() for v in row.iloc[1:]
+                       if pd.notna(v) and str(v).strip() and str(v).strip() != "nan"]
+            return {p: True for p in players}
+        return {}
+    except Exception:
+        return {}
+
+
+def save_live_checkin(session_date: dt.date, attendance: dict[str, bool]) -> bool:
+    """Write today's attendance to the ``LiveCheckin`` worksheet.
+
+    Replaces any existing row for this date with a fresh row listing
+    all players whose attendance value is ``True``.
+    """
+    conn = get_connection()
+    date_str = session_date.isoformat()
+    present = sorted([n for n, v in attendance.items() if v])
+    try:
+        ws = _get_gspread_worksheet(LIVE_CHECKIN_WS)
+        # Read existing rows to find a date match
+        df = conn.read(worksheet=LIVE_CHECKIN_WS, ttl=0)
+        row_to_overwrite = None
+        if df is not None and not df.empty:
+            df = df.dropna(how="all")
+            # Check if our date already exists
+            col0 = df.iloc[:, 0].astype(str).str.strip()
+            matches = col0[col0 == date_str].index.tolist()
+            if matches:
+                row_to_overwrite = matches[0] + 1  # 1-indexed, header is row 1
+
+        new_row = [date_str] + present
+
+        if row_to_overwrite is not None:
+            # Update the existing row in place (gspread row update)
+            # Build a range that covers all columns we need
+            end_col = len(new_row)
+            cell_range = f"A{row_to_overwrite}:{chr(64 + end_col)}{row_to_overwrite}"
+            cell_list = ws.range(cell_range)
+            for i, val in enumerate(new_row):
+                cell_list[i].value = val
+            # Clear any extra cells that might remain from a longer previous row
+            for i in range(len(new_row), len(cell_list)):
+                cell_list[i].value = ""
+            ws.update_cells(cell_list, value_input_option="USER_ENTERED")
+        else:
+            # Append a new row
+            ws.append_row(new_row, value_input_option="USER_ENTERED")
+        return True
+    except Exception as exc:
+        st.error(f"Could not save attendance: {exc}")
+        return False
+
 
 def read_live_games(session_date: dt.date) -> list[dict]:
     """Read today's live games from the sheet. Returns list of game dicts."""
@@ -259,11 +360,16 @@ def read_live_games(session_date: dt.date) -> list[dict]:
 
 
 def add_live_game(session_date: dt.date, players: list[str], shuttles: int) -> bool:
-    """Add one game to the live sheet. Anyone who opens the app sees it."""
-    conn = get_connection()
+    """Add one game to the live sheet via raw gspread ``append_row()``.
+
+    Anyone who opens the app sees it immediately — no ``cell`` parameter needed.
+    """
     date_str = session_date.isoformat()
     try:
-        # Read existing to find next game number
+        ws = _get_gspread_worksheet(LIVE_GAMES_WS)
+
+        # Read existing game numbers (via GSheetsConnection.read for simpler parsing)
+        conn = get_connection()
         existing = conn.read(worksheet=LIVE_GAMES_WS, ttl=0)
         next_num = 1
         if existing is not None and not existing.empty:
@@ -272,14 +378,9 @@ def add_live_game(session_date: dt.date, players: list[str], shuttles: int) -> b
                 nums = existing["GameNum"].dropna().astype(int).tolist()
                 if nums:
                     next_num = max(nums) + 1
-            start_row = len(existing) + 2
-        else:
-            # Write header
-            conn.update(worksheet=LIVE_GAMES_WS, data=[GAME_LOG_COLUMNS])
-            start_row = 2
 
-        row = [[date_str, next_num, ", ".join(players), shuttles, "app"]]
-        conn.update(worksheet=LIVE_GAMES_WS, data=row, cell=f"A{start_row}")
+        row = [date_str, next_num, ", ".join(players), shuttles, "app"]
+        ws.append_row(row, value_input_option="USER_ENTERED")
         return True
     except Exception as exc:
         st.error(f"Could not add game: {exc}")
@@ -287,10 +388,10 @@ def add_live_game(session_date: dt.date, players: list[str], shuttles: int) -> b
 
 
 def delete_last_game(session_date: dt.date) -> bool:
-    """Remove the last game for today from the live sheet."""
-    conn = get_connection()
+    """Remove the last game for today from the live sheet via ``delete_rows()``."""
     date_str = session_date.isoformat()
     try:
+        conn = get_connection()
         df = conn.read(worksheet=LIVE_GAMES_WS, ttl=0)
         if df is None or df.empty:
             return False
@@ -301,13 +402,12 @@ def delete_last_game(session_date: dt.date) -> bool:
         today_mask = dates == date_str
         if not today_mask.any():
             return False
-        # Find the last row for today and remove it
+        # Find the last row for today and remove it via gspread delete_rows
         today_idxs = df[today_mask].index.tolist()
         last_idx = today_idxs[-1]
-        # Clear that row
-        row_num = last_idx + 2  # 1-indexed + header
-        conn.update(worksheet=LIVE_GAMES_WS, data=[[""] * len(GAME_LOG_COLUMNS)],
-                    cell=f"A{row_num}")
+        row_num = last_idx + 2  # 1-indexed + header row
+        ws = _get_gspread_worksheet(LIVE_GAMES_WS)
+        ws.delete_rows(row_num)
         return True
     except Exception:
         return False
@@ -472,13 +572,26 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
     block.append(blank.copy())
 
     try:
+        ws = _get_gspread_worksheet(tab)
+        # Find the next empty row (after existing content)
         existing = conn.read(worksheet=tab, ttl=0)
         if existing is not None and not existing.empty:
             existing_df = existing.dropna(how="all")
             start_row = len(existing_df) + 2
         else:
             start_row = 1
-        conn.update(worksheet=tab, data=block, cell=f"A{start_row}")
+        # Update a range of cells starting at the computed start_row
+        n_rows = len(block)
+        n_cols = max(len(r) for r in block) if block else 1
+        end_col_letter = chr(64 + n_cols) if n_cols <= 26 else "Z"
+        cell_range = f"A{start_row}:{end_col_letter}{start_row + n_rows - 1}"
+        cell_list = ws.range(cell_range)
+        idx = 0
+        for row in block:
+            for val in row:
+                cell_list[idx].value = val
+                idx += 1
+        ws.update_cells(cell_list, value_input_option="USER_ENTERED")
         return True
     except Exception as exc:
         st.error(f"Could not submit to tab '{tab}': {exc}")
@@ -585,7 +698,9 @@ def init_state() -> None:
     ss = st.session_state
     ss.setdefault("session_date", dt.date.today())
     ss.setdefault("shuttle_price", DEFAULT_SHUTTLE_PRICE)
-    ss.setdefault("attendance", {})        # {player_name: bool}
+    # Try loading attendance from the shared LiveCheckin sheet
+    if "attendance" not in ss:
+        ss["attendance"] = read_live_checkin(ss["session_date"])
     ss.setdefault("court_hours", {c: 0 for c in COURTS})  # {court: hours}
     # Games are read live from the sheet — no local state needed
 
@@ -596,9 +711,18 @@ def init_state() -> None:
 def view_live_tracker(players: pd.DataFrame) -> None:
     st.header("🏟️ On-Court Live Tracker")
 
-    st.session_state.session_date = st.date_input(
+    # If the user changes the date, re-load attendance from the shared sheet.
+    prev_date = st.session_state.get("_prev_live_date")
+    session_date = st.date_input(
         "Session date", value=st.session_state.session_date
     )
+    if prev_date is not None and session_date != prev_date:
+        st.session_state.session_date = session_date
+        st.session_state.attendance = read_live_checkin(session_date)
+        st.session_state["_prev_live_date"] = session_date
+        st.rerun()
+    st.session_state.session_date = session_date
+    st.session_state["_prev_live_date"] = session_date
 
     # ---- Daily attendance grid -------------------------------------------
     st.subheader("✅ Attendance")
@@ -619,6 +743,17 @@ def view_live_tracker(players: pd.DataFrame) -> None:
                 )
         present_count = sum(1 for v in st.session_state.attendance.values() if v)
         st.metric("Players present", present_count)
+
+        # Save attendance button — persists to shared sheet so everyone sees it.
+        if st.button("💾 Save attendance", type="secondary", use_container_width=True):
+            with st.spinner("Saving attendance to Google Sheets…"):
+                ok = save_live_checkin(
+                    st.session_state.session_date,
+                    st.session_state.attendance,
+                )
+                if ok:
+                    st.success("✅ Attendance saved — everyone can see it now!")
+                    st.rerun()
 
     st.divider()
 
@@ -784,7 +919,8 @@ def compute_split(players: pd.DataFrame) -> pd.DataFrame:
     price = float(st.session_state.shuttle_price)
     shuttle_cost = {name: 0.0 for name in present_names}
     games_played = {name: 0 for name in present_names}
-    for g in st.session_state.games:
+    live_games = read_live_games(st.session_state.session_date)
+    for g in live_games:
         valid = [p for p in g.get("players", []) if p in shuttle_cost]
         if not valid:
             continue
@@ -821,11 +957,12 @@ def view_ledger(players: pd.DataFrame) -> None:
         return
 
     n_present = len(present_names)
-    n_games = len([g for g in st.session_state.games if g.get("players")])
+    live_games = read_live_games(st.session_state.session_date)
+    n_games = len(live_games)
     total_court_hours = sum(st.session_state.court_hours.values())
     total_court_cost = total_court_hours * COURT_HOUR_RATE
     total_shuttle_cost = sum(
-        g.get("shuttles", 0) for g in st.session_state.games
+        g.get("shuttles", 0) for g in live_games
     ) * st.session_state.shuttle_price
 
     m1, m2, m3 = st.columns(3)
