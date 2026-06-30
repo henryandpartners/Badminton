@@ -513,12 +513,10 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
         row[18] = str(games_played)
         row[19] = f"{player_shuttle_cost.get(player, 0):.2f}"
 
-        if player_types.get(player, "") == "ขาจร" and n_present > 0:
-            court_share = total_court_cost / n_present
-            row[20] = f"{court_share:.2f}"
-            row[21] = f"{player_shuttle_cost.get(player, 0) + court_share:.2f}"
-        else:
-            row[21] = f"{player_shuttle_cost.get(player, 0):.2f}"
+        # Flat court fee: 80 THB per person (for both ประจำ and ขาจร)
+        court_per_player = 80.0
+        row[20] = f"{court_per_player:.2f}"
+        row[21] = f"{player_shuttle_cost.get(player, 0) + court_per_player:.2f}"
 
         row[22] = "FALSE"
         row[24] = "0"
@@ -526,47 +524,43 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
         block.append(row)
 
     # Summary row
+    total_court_fees = n_present * 80.0
     summary = blank.copy()
     summary[0] = "รวมเซสชัน"
     summary[18] = str(sum(player_game_count.values()))
     summary[19] = f"{total_shuttle_cost:.2f}"
-    summary[20] = f"{total_court_cost:.2f}"
-    summary[21] = f"{total_shuttle_cost + total_court_cost:.2f}"
+    summary[20] = f"{total_court_fees:.2f}"
+    summary[21] = f"{total_shuttle_cost + total_court_fees:.2f}"
     summary[24] = "0"
     summary[25] = "0"
     block.append(summary)
 
     block.append(blank.copy())  # spacer
 
-    # Court section
+    # Court section (flat fee: 80 THB per player)
     court_header = blank.copy()
-    court_header[0] = "ค่าเช่าสนาม (155 บาท/ชม./สนาม)"
+    court_header[0] = "ค่าเช่าสนาม (80 บาท/คน)"
     block.append(court_header)
 
     court_cols = blank.copy()
     court_cols[0] = "สนาม"
-    court_cols[1] = "20:00-21:00"
-    court_cols[2] = "21:00-22:00"
-    court_cols[3] = "22:00-23:00"
-    court_cols[4] = "ชั่วโมง"
-    court_cols[5] = "ค่าใช้จ่าย"
+    court_cols[1] = "จำนวนผู้เล่น"
+    court_cols[2] = "ค่าธรรมเนียม/คน"
+    court_cols[3] = "รวม"
     block.append(court_cols)
 
     for court_id in ["9", "10"]:
         cr = blank.copy()
         cr[0] = f"สนาม {court_id}"
         h = court_hours.get(court_id, 0)
-        for slot in range(h):
-            if slot < 3:
-                cr[1 + slot] = "TRUE"
-        cr[4] = str(h)
-        cr[5] = f"{h * COURT_HOUR_RATE:.2f}"
+        cr[1] = str(n_present)
+        cr[2] = "80"
+        cr[3] = f"{n_present * 80.0:.2f}"
         block.append(cr)
 
     court_total = blank.copy()
     court_total[0] = "รวมค่าสนาม"
-    court_total[4] = str(total_court_hours)
-    court_total[5] = f"{total_court_cost:.2f}"
+    court_total[2] = f"{n_present * 80.0:.2f}"
     block.append(court_total)
 
     block.append(blank.copy())
@@ -910,10 +904,8 @@ def compute_split(players: pd.DataFrame) -> pd.DataFrame:
     if count == 0:
         return pd.DataFrame(columns=PAYMENTS_COLUMNS)
 
-    # Court cost split equally among checked-in players.
-    total_court_hours = sum(st.session_state.court_hours.values())
-    total_court_cost = total_court_hours * COURT_HOUR_RATE
-    court_share = total_court_cost / count
+    # Court cost: flat 80 THB per checked-in player
+    court_share = 80.0
 
     # Per-game shuttle cost shared among that game's players.
     price = float(st.session_state.shuttle_price)
@@ -957,23 +949,20 @@ def view_ledger(players: pd.DataFrame) -> None:
         return
 
     n_present = len(present_names)
+    total_court_cost = n_present * 80.0
     live_games = read_live_games(st.session_state.session_date)
     n_games = len(live_games)
-    total_court_hours = sum(st.session_state.court_hours.values())
-    total_court_cost = total_court_hours * COURT_HOUR_RATE
     total_shuttle_cost = sum(
         g.get("shuttles", 0) for g in live_games
     ) * st.session_state.shuttle_price
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Court cost", f"{total_court_cost:,.0f}")
+    m1.metric("Court (80/คน)", f"{total_court_cost:,.0f}")
     m2.metric("Shuttle cost", f"{total_shuttle_cost:,.0f}")
     m3.metric("Players", f"{n_present}")
 
     st.caption(
-        f"Court: {total_court_hours} court-hour(s) × {COURT_HOUR_RATE:,.0f} = "
-        f"**{total_court_cost:,.0f}**, split equally → "
-        f"**{(total_court_cost / n_present if n_present else 0):,.2f}/player**. "
+        f"Court: **80 THB/player** × {n_present} = **{total_court_cost:,.0f} THB**. "
         f"Shuttles: {total_shuttle_cost:,.0f} THB across {n_games} game(s), "
         f"each game shared among its players."
     )
