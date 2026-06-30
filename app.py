@@ -211,6 +211,69 @@ def write_payments(df: pd.DataFrame) -> bool:
         return False
 
 
+# Map month number to existing sheet tab name
+MONTH_TABS = {
+    1: "7 2026-01", 2: "7 2026-02", 3: "7 2026-03", 4: "7 2026-04",
+    5: "7 2026-05", 6: "5 2026-06",
+    7: "2026-07", 8: "2026-08", 9: "2026-09",
+    10: "2026-10", 11: "2026-11", 12: "2026-12",
+}
+
+
+def get_month_tab(date: dt.date) -> str:
+    """Return the worksheet name for the given date's month."""
+    return MONTH_TABS.get(date.month, f"{date.year}-{date.month:02d}")
+
+
+def append_game_log(recorded_games: list, session_date: dt.date) -> bool:
+    """Write today's game log as a new row in the correct monthly tab.
+
+    Each game gets a row: Date, Game#, Players, Shuttles.
+    Reads existing content and appends.
+    """
+    conn = get_connection()
+    tab = get_month_tab(session_date)
+    date_str = session_date.isoformat()
+
+    # Build rows
+    rows = []
+    for g in recorded_games:
+        rows.append([
+            date_str,
+            f"Game {g['game']}",
+            ", ".join(g["players"]),
+            g["shuttles"],
+        ])
+
+    try:
+        # Read existing data to find where to append
+        existing = conn.read(worksheet=tab, ttl=0)
+        if existing is not None and not existing.empty:
+            # Find the last row with data
+            existing = existing.dropna(how="all")
+            start_row = len(existing) + 1  # 1-indexed, after all data
+        else:
+            # Write header
+            header = [["Date", "Game", "Players", "Shuttles"]]
+            conn.update(worksheet=tab, data=header)
+            start_row = 2  # After header
+
+        # Append new rows
+        conn.update(worksheet=tab, data=rows, cell=f"A{start_row}")
+        return True
+    except Exception as exc:
+        # Tab may not exist — try creating header first
+        try:
+            header = [["Date", "Game", "Players", "Shuttles"]]
+            conn.update(worksheet=tab, data=header)
+            # Then append
+            conn.update(worksheet=tab, data=rows, cell="A2")
+            return True
+        except Exception as exc2:
+            st.error(f"Could not write to tab '{tab}': {exc2}")
+            return False
+
+
 def upsert_session_rows(session_rows: pd.DataFrame) -> bool:
     """Insert/replace all Payments rows for the session's date.
 
@@ -529,17 +592,33 @@ def view_game_recorder(players: pd.DataFrame) -> None:
 
     st.divider()
 
-    # ---- End-of-day: push games into session ----
+    # ---- Save to monthly sheet ----
     if ss["recorded_games"]:
-        st.subheader("🏁 Finish Recording")
-        st.caption("Push games into the session so the **Split** tab can calculate court + shuttle costs.")
-        if st.button("📤 Push games & go to Split", type="primary", use_container_width=True):
-            ss["games"] = [{"players": g["players"], "shuttles": g["shuttles"]} for g in ss["recorded_games"]]
-            st.success(f"✅ {len(ss['recorded_games'])} game(s) pushed! Open the **🧾 Split** tab.")
-        if st.button("🗑️ Clear all", use_container_width=True):
-            ss["recorded_games"] = []
-            ss["current_game"] = 1
-            st.rerun()
+        st.subheader("💾 Save to Sheet")
+        st.caption(
+            f"Write all {len(ss['recorded_games'])} game(s) to the **{get_month_tab(ss['session_date'])}** tab "
+            f"under **{ss['session_date']}**."
+        )
+
+        col_save, col_push, col_clear = st.columns(3)
+
+        with col_save:
+            if st.button("💾 Save games to Sheet", type="primary", use_container_width=True):
+                with st.spinner("Writing to Google Sheets…"):
+                    if append_game_log(ss["recorded_games"], ss["session_date"]):
+                        st.success(f"✅ {len(ss['recorded_games'])} game(s) saved to '{get_month_tab(ss['session_date'])}'!")
+                        st.balloons()
+
+        with col_push:
+            if st.button("📤 Push to Split", use_container_width=True):
+                ss["games"] = [{"players": g["players"], "shuttles": g["shuttles"]} for g in ss["recorded_games"]]
+                st.success(f"✅ {len(ss['recorded_games'])} game(s) pushed! Open the **🧾 Split** tab.")
+
+        with col_clear:
+            if st.button("🗑️ Clear all", use_container_width=True):
+                ss["recorded_games"] = []
+                ss["current_game"] = 1
+                st.rerun()
 
 
 # =============================================================================
