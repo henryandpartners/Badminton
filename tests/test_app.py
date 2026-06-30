@@ -8,13 +8,17 @@
 """
 
 import io
-import os
 import pathlib
+import sys
 
 import pandas as pd
 from PIL import Image, ImageDraw
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# Ensure `import app` works regardless of how pytest is invoked (the `pytest`
+# console script does not add the repo root to sys.path; `python -m pytest` does).
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _write_dummy_secrets() -> None:
