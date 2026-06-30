@@ -227,55 +227,191 @@ def get_month_tab(date: dt.date) -> str:
 
 def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours: dict,
                         attendance: dict, shuttle_price: float) -> bool:
-    """Submit the entire day's record to the correct monthly tab under today's date.
+    """Submit the entire day to the monthly tab, matching the existing sheet format.
 
-    Writes a date header row, then game rows with players + shuttles, then a
-    summary row with court cost and shuttle fees. Appends after existing data
-    in the monthly tab (e.g. 2026-07 for July).
+    Writes a block per date with:
+      Row 0: Date header  (e.g. "2026-07-01 จันพุธ - สนาม 9 & 10 (20:00-23:00)")
+      Row 1: Column headers (ผู้เล่น, ประเภท, เช็คอิน, เกม1..เกม15, จำนวนเกม, etc.)
+      Rows 2+: Each player with their game checkboxes + shuttle/court costs
+      Summary: รวมเซสชัน
+      Court section: ค่าเช่าสนาม → court hours table
     """
     conn = get_connection()
     tab = get_month_tab(session_date)
     date_str = session_date.isoformat()
     price = shuttle_price
 
-    # Count present players
-    present = [n for n, v in attendance.items() if v]
-    n_present = len(present)
+    # Map day name to Thai
+    thai_days = ["จัน", "อัง", "พุธ", "พฤ", "ศุก", "เสา", "อาทิ"]
+    day_name = thai_days[session_date.weekday()]
 
-    # Court cost (total, not split)
+    # Present players list
+    present = [n for n, v in attendance.items() if v]
+    present_names = sorted(present) if present else []
+    n_present = len(present_names)
+
+    # Read full roster to get player types (ประจำ/ขาจร)
+    roster_data = conn.read(worksheet=ROSTER_WS, ttl=0)
+    player_types = {}
+    if roster_data is not None and not roster_data.empty:
+        df = roster_data.dropna(how="all")
+        if len(df.columns) >= 2:
+            name_col = "ชื่อผู้เล่น" if "ชื่อผู้เล่น" in df.columns else df.columns[0]
+            type_col = "ประเภท" if "ประเภท" in df.columns else df.columns[1]
+            for _, row in df.iterrows():
+                nm = str(row[name_col]).strip()
+                tp = str(row[type_col]).strip() if pd.notna(row[type_col]) else ""
+                if nm and nm != name_col:
+                    player_types[nm] = tp
+
+    # Court usage
     total_court_hours = sum(court_hours.values())
     total_court_cost = total_court_hours * COURT_HOUR_RATE
 
-    # Shuttle totals
-    total_shuttles = sum(g["shuttles"] for g in recorded_games)
-    total_shuttle_cost = total_shuttles * price
+    # Game analysis
+    max_games = max((g.get("shuttles", 0) for g in recorded_games), default=0)
+    player_game_count = {p: 0 for p in present_names}
+    player_shuttle_cost = {p: 0.0 for p in present_names}
 
-    # Build rows to append: header + each game + summary
-    rows = []
-    # Date header row
-    rows.append([f"--- {date_str} ---", "", "", "", ""])
-    # Game rows
-    for i, g in enumerate(recorded_games, start=1):
-        players_str = ", ".join(g.get("players", []))
-        rows.append([date_str, f"Game {i}", players_str, g.get("shuttles", 0), ""])
+    for i, g in enumerate(recorded_games):
+        players_in_game = [p for p in g.get("players", []) if p in player_game_count]
+        cost = g.get("shuttles", 0) * price
+        per = cost / len(players_in_game) if players_in_game else 0
+        for p in players_in_game:
+            player_game_count[p] = player_game_count.get(p, 0) + 1
+            player_shuttle_cost[p] = player_shuttle_cost.get(p, 0) + per
+
+    total_shuttle_cost = sum(player_shuttle_cost.values())
+
+    # Build the block rows
+    block = []
+    blank = [""] * 26
+
+    # Row 0: Date header
+    date_header = f"{date_str} {day_name} - สนาม 9 & 10 (20:00-23:00)"
+    row0 = blank.copy()
+    row0[0] = date_header
+    block.append(row0)
+
+    # Row 1: Column headers
+    row1 = blank.copy()
+    headers = {
+        0: "ผู้เล่น", 1: "ประเภท", 2: "เช็คอิน",
+        3: "เกม1", 4: "เกม2", 5: "เกม3", 6: "เกม4", 7: "เกม5",
+        8: "เกม6", 9: "เกม7", 10: "เกม8", 11: "เกม9", 12: "เกม10",
+        13: "เกม11", 14: "เกม12", 15: "เกม13", 16: "เกม14", 17: "เกม15",
+        18: "จำนวนเกม", 19: "ค่าลูก", 20: "ค่าสนามขาจร", 21: "ยอดรวม",
+        22: "โอน", 23: "เงินสด", 24: "จ่ายแล้ว", 25: "ค้างชำระ"
+    }
+    for col, h in headers.items():
+        row1[col] = h
+    block.append(row1)
+
+    # Player rows
+    for player in present_names:
+        row = blank.copy()
+        row[0] = player
+        row[1] = player_types.get(player, "ขาจร")
+        row[2] = "TRUE"  # checked in
+
+        # Mark which games this player played
+        games_played = 0
+        for gi, g in enumerate(recorded_games):
+            if player in g.get("players", []):
+                col_idx = 3 + gi if gi < 15 else 17  # max 15 games
+                if gi < 15:
+                    row[col_idx] = "TRUE"
+                games_played += 1
+
+        row[18] = str(games_played)
+        row[19] = f"{player_shuttle_cost.get(player, 0):.2f}"
+
+        # Court cost for ขาจร only
+        if player_types.get(player, "") == "ขาจร" and n_present > 0:
+            court_share = total_court_cost / n_present
+            row[20] = f"{court_share:.2f}"
+            row[21] = f"{player_shuttle_cost.get(player, 0) + court_share:.2f}"
+        else:
+            row[21] = f"{player_shuttle_cost.get(player, 0):.2f}"
+
+        row[22] = "FALSE"
+        row[24] = "0"
+        row[25] = "0"
+        block.append(row)
+
     # Summary row
-    rows.append(["", "Court hours", f"{total_court_hours}", f"{total_court_cost:,.0f} THB", ""])
-    rows.append(["", "Shuttles total", f"{total_shuttles}", f"{total_shuttle_cost:,.0f} THB", ""])
-    rows.append(["", "Players present", f"{n_present}", "", ""])
-    rows.append(["", "", "", "", ""])  # blank separator
+    summary = blank.copy()
+    summary[0] = "รวมเซสชัน"
+    summary[18] = str(sum(player_game_count.values()))
+    summary[19] = f"{total_shuttle_cost:.2f}"
+    summary[20] = f"{total_court_cost:.2f}"
+    summary[21] = f"{total_shuttle_cost + total_court_cost:.2f}"
+    summary[24] = "0"
+    summary[25] = "0"
+    block.append(summary)
+
+    # Blank separator
+    block.append(blank.copy())
+
+    # Court section
+    court_section = blank.copy()
+    block.append(court_section)  # empty row for spacing
+
+    court_header = blank.copy()
+    court_header[0] = "ค่าเช่าสนาม (155 บาท/ชม./สนาม)"
+    block.append(court_header)
+
+    court_cols = blank.copy()
+    court_cols[0] = "สนาม"
+    court_cols[1] = "20:00-21:00"
+    court_cols[2] = "21:00-22:00"
+    court_cols[3] = "22:00-23:00"
+    court_cols[4] = "ชั่วโมง"
+    court_cols[5] = "ค่าใช้จ่าย"
+    block.append(court_cols)
+
+    court9 = blank.copy()
+    court9[0] = "สนาม 9"
+    h9 = court_hours.get("9", 0)
+    # Mark hours used
+    for h in range(h9):
+        if h < 3:
+            court9[1 + h] = "TRUE"
+    court9[4] = str(h9)
+    court9[5] = f"{h9 * COURT_HOUR_RATE:.2f}"
+    block.append(court9)
+
+    court10 = blank.copy()
+    court10[0] = "สนาม 10"
+    h10 = court_hours.get("10", 0)
+    for h in range(h10):
+        if h < 3:
+            court10[1 + h] = "TRUE"
+    court10[4] = str(h10)
+    court10[5] = f"{h10 * COURT_HOUR_RATE:.2f}"
+    block.append(court10)
+
+    court_total = blank.copy()
+    court_total[0] = "รวมค่าสนาม"
+    court_total[4] = str(total_court_hours)
+    court_total[5] = f"{total_court_cost:.2f}"
+    block.append(court_total)
+
+    # Blank row at end
+    block.append(blank.copy())
 
     try:
         existing = conn.read(worksheet=tab, ttl=0)
         if existing is not None and not existing.empty:
-            existing = existing.dropna(how="all")
-            start_row = len(existing) + 2
+            existing_df = existing.dropna(how="all")
+            start_row = len(existing_df) + 2
         else:
             start_row = 1
 
-        conn.update(worksheet=tab, data=rows, cell=f"A{start_row}")
+        conn.update(worksheet=tab, data=block, cell=f"A{start_row}")
         return True
     except Exception as exc:
-        st.error(f"Could not write to tab '{tab}': {exc}")
+        st.error(f"Could not submit to tab '{tab}': {exc}")
         return False
 
 
