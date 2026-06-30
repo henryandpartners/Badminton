@@ -225,6 +225,96 @@ def get_month_tab(date: dt.date) -> str:
     return MONTH_TABS.get(date.month, f"{date.year}-{date.month:02d}")
 
 
+# ── Live games (shared across all users via Google Sheet) ──────────────
+LIVE_GAMES_WS = "LiveGames"
+
+GAME_LOG_COLUMNS = ["Date", "GameNum", "Players", "Shuttles", "AddedBy"]
+
+
+def read_live_games(session_date: dt.date) -> list[dict]:
+    """Read today's live games from the sheet. Returns list of game dicts."""
+    conn = get_connection()
+    date_str = session_date.isoformat()
+    try:
+        df = conn.read(worksheet=LIVE_GAMES_WS, ttl=0)
+        if df is None or df.empty:
+            return []
+        df = df.dropna(how="all")
+        # Filter to today's date
+        if "Date" in df.columns:
+            df["Date"] = df["Date"].astype(str).str.strip()
+            todays = df[df["Date"] == date_str]
+            games = []
+            for _, row in todays.iterrows():
+                players_str = str(row.get("Players", "")).strip()
+                players = [p.strip() for p in players_str.split(",") if p.strip()]
+                games.append({
+                    "players": players,
+                    "shuttles": int(float(str(row.get("Shuttles", 0)))),
+                })
+            return games
+        return []
+    except Exception:
+        return []
+
+
+def add_live_game(session_date: dt.date, players: list[str], shuttles: int) -> bool:
+    """Add one game to the live sheet. Anyone who opens the app sees it."""
+    conn = get_connection()
+    date_str = session_date.isoformat()
+    try:
+        # Read existing to find next game number
+        existing = conn.read(worksheet=LIVE_GAMES_WS, ttl=0)
+        next_num = 1
+        if existing is not None and not existing.empty:
+            existing = existing.dropna(how="all")
+            if "GameNum" in existing.columns:
+                nums = existing["GameNum"].dropna().astype(int).tolist()
+                if nums:
+                    next_num = max(nums) + 1
+            start_row = len(existing) + 2
+        else:
+            # Write header
+            conn.update(worksheet=LIVE_GAMES_WS, data=[GAME_LOG_COLUMNS])
+            start_row = 2
+
+        row = [[date_str, next_num, ", ".join(players), shuttles, "app"]]
+        conn.update(worksheet=LIVE_GAMES_WS, data=row, cell=f"A{start_row}")
+        return True
+    except Exception as exc:
+        st.error(f"Could not add game: {exc}")
+        return False
+
+
+def delete_last_game(session_date: dt.date) -> bool:
+    """Remove the last game for today from the live sheet."""
+    conn = get_connection()
+    date_str = session_date.isoformat()
+    try:
+        df = conn.read(worksheet=LIVE_GAMES_WS, ttl=0)
+        if df is None or df.empty:
+            return False
+        df = df.dropna(how="all")
+        if "Date" not in df.columns:
+            return False
+        dates = df["Date"].astype(str).str.strip()
+        today_mask = dates == date_str
+        if not today_mask.any():
+            return False
+        # Find the last row for today and remove it
+        today_idxs = df[today_mask].index.tolist()
+        last_idx = today_idxs[-1]
+        # Clear that row
+        row_num = last_idx + 2  # 1-indexed + header
+        conn.update(worksheet=LIVE_GAMES_WS, data=[[""] * len(GAME_LOG_COLUMNS)],
+                    cell=f"A{row_num}")
+        return True
+    except Exception:
+        return False
+
+
+# ── End-of-day: submit full block to monthly tab ──────────────────────
+
 def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours: dict,
                         attendance: dict, shuttle_price: float) -> bool:
     """Submit the entire day to the monthly tab, matching the existing sheet format.
@@ -269,11 +359,10 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
     total_court_cost = total_court_hours * COURT_HOUR_RATE
 
     # Game analysis
-    max_games = max((g.get("shuttles", 0) for g in recorded_games), default=0)
     player_game_count = {p: 0 for p in present_names}
     player_shuttle_cost = {p: 0.0 for p in present_names}
 
-    for i, g in enumerate(recorded_games):
+    for g in recorded_games:
         players_in_game = [p for p in g.get("players", []) if p in player_game_count]
         cost = g.get("shuttles", 0) * price
         per = cost / len(players_in_game) if players_in_game else 0
@@ -312,21 +401,18 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
         row = blank.copy()
         row[0] = player
         row[1] = player_types.get(player, "ขาจร")
-        row[2] = "TRUE"  # checked in
+        row[2] = "TRUE"
 
-        # Mark which games this player played
         games_played = 0
         for gi, g in enumerate(recorded_games):
             if player in g.get("players", []):
-                col_idx = 3 + gi if gi < 15 else 17  # max 15 games
                 if gi < 15:
-                    row[col_idx] = "TRUE"
+                    row[3 + gi] = "TRUE"
                 games_played += 1
 
         row[18] = str(games_played)
         row[19] = f"{player_shuttle_cost.get(player, 0):.2f}"
 
-        # Court cost for ขาจร only
         if player_types.get(player, "") == "ขาจร" and n_present > 0:
             court_share = total_court_cost / n_present
             row[20] = f"{court_share:.2f}"
@@ -350,13 +436,9 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
     summary[25] = "0"
     block.append(summary)
 
-    # Blank separator
-    block.append(blank.copy())
+    block.append(blank.copy())  # spacer
 
     # Court section
-    court_section = blank.copy()
-    block.append(court_section)  # empty row for spacing
-
     court_header = blank.copy()
     court_header[0] = "ค่าเช่าสนาม (155 บาท/ชม./สนาม)"
     block.append(court_header)
@@ -370,26 +452,16 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
     court_cols[5] = "ค่าใช้จ่าย"
     block.append(court_cols)
 
-    court9 = blank.copy()
-    court9[0] = "สนาม 9"
-    h9 = court_hours.get("9", 0)
-    # Mark hours used
-    for h in range(h9):
-        if h < 3:
-            court9[1 + h] = "TRUE"
-    court9[4] = str(h9)
-    court9[5] = f"{h9 * COURT_HOUR_RATE:.2f}"
-    block.append(court9)
-
-    court10 = blank.copy()
-    court10[0] = "สนาม 10"
-    h10 = court_hours.get("10", 0)
-    for h in range(h10):
-        if h < 3:
-            court10[1 + h] = "TRUE"
-    court10[4] = str(h10)
-    court10[5] = f"{h10 * COURT_HOUR_RATE:.2f}"
-    block.append(court10)
+    for court_id in ["9", "10"]:
+        cr = blank.copy()
+        cr[0] = f"สนาม {court_id}"
+        h = court_hours.get(court_id, 0)
+        for slot in range(h):
+            if slot < 3:
+                cr[1 + slot] = "TRUE"
+        cr[4] = str(h)
+        cr[5] = f"{h * COURT_HOUR_RATE:.2f}"
+        block.append(cr)
 
     court_total = blank.copy()
     court_total[0] = "รวมค่าสนาม"
@@ -397,7 +469,6 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
     court_total[5] = f"{total_court_cost:.2f}"
     block.append(court_total)
 
-    # Blank row at end
     block.append(blank.copy())
 
     try:
@@ -407,7 +478,6 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
             start_row = len(existing_df) + 2
         else:
             start_row = 1
-
         conn.update(worksheet=tab, data=block, cell=f"A{start_row}")
         return True
     except Exception as exc:
@@ -517,8 +587,7 @@ def init_state() -> None:
     ss.setdefault("shuttle_price", DEFAULT_SHUTTLE_PRICE)
     ss.setdefault("attendance", {})        # {player_name: bool}
     ss.setdefault("court_hours", {c: 0 for c in COURTS})  # {court: hours}
-    # games: list of {"players": [names], "shuttles": int}
-    ss.setdefault("games", [])  # list of {"players": [names], "shuttles": int}
+    # Games are read live from the sheet — no local state needed
 
 
 # =============================================================================
@@ -573,8 +642,8 @@ def view_live_tracker(players: pd.DataFrame) -> None:
 
     st.divider()
 
-    # ---- Per-game players + shuttles -------------------------------------
-    st.subheader("🎮 Games & shuttles")
+    # ---- Live games (shared across all users) -------------------------------
+    st.subheader("🎮 Games")
     present_names = [n for n, v in st.session_state.attendance.items() if v]
     st.session_state.shuttle_price = st.number_input(
         "Shuttle price (THB each)",
@@ -582,82 +651,100 @@ def view_live_tracker(players: pd.DataFrame) -> None:
         value=float(st.session_state.shuttle_price),
         step=10.0,
     )
-    if not present_names:
-        st.caption("Check players in above, then add games, pick who played, and set shuttles used.")
+
+    # Read live games from sheet
+    live_games = read_live_games(st.session_state.session_date)
+
+    # Show current games list
+    if live_games:
+        st.markdown(f"**{len(live_games)} game(s) recorded today:**")
+        for i, g in enumerate(live_games, start=1):
+            players_str = ", ".join(g["players"])
+            fee = g["shuttles"] * st.session_state.shuttle_price / max(len(g["players"]), 1)
+            st.markdown(f"**Game {i}** · {g['shuttles']} shuttle(s) · {players_str} — _{fee:.0f} THB/player_")
     else:
+        st.info("No games yet. Add the first game below!")
+
+    # Quick totals preview
+    if live_games:
+        total_shuttle_cost = sum(g["shuttles"] for g in live_games) * st.session_state.shuttle_price
+        court_hours_total = sum(st.session_state.court_hours.values())
+        court_cost = court_hours_total * COURT_HOUR_RATE
         st.caption(
-            "Each game's shuttle cost is shared among its players "
-            "(e.g. 1 shuttle, 4 players → 25 THB each)."
+            f"Running total: 🏸 {total_shuttle_cost:.0f} THB shuttles + "
+            f"🏟️ {court_cost:.0f} THB court = **{total_shuttle_cost + court_cost:.0f} THB**"
         )
-        gc_add, gc_clear = st.columns(2)
-        with gc_add:
-            if st.button("➕ Add game", use_container_width=True):
-                st.session_state.games.append({"players": [], "shuttles": 1})
-        with gc_clear:
-            if st.button("🗑️ Clear games", use_container_width=True):
-                st.session_state.games = []
 
-        for gi in range(len(st.session_state.games)):
-            game = st.session_state.games[gi]
-            with st.container(border=True):
-                default = [p for p in game.get("players", []) if p in present_names]
-                game["players"] = st.multiselect(
-                    f"เกม {gi + 1} — players",
-                    options=present_names,
-                    default=default,
-                    key=f"game_players_{gi}",
-                )
-                row = st.columns([3, 1])
-                with row[0]:
-                    game["shuttles"] = st.number_input(
-                        "Shuttles used",
-                        min_value=0,
-                        value=int(game.get("shuttles", 1)),
-                        step=1,
-                        key=f"game_shuttles_{gi}",
-                    )
-                with row[1]:
-                    st.write("")
-                    if st.button("✕", key=f"delgame_{gi}", help="Remove this game"):
-                        st.session_state.games.pop(gi)
-                        st.rerun()
-                np_ = len(game["players"])
-                if np_:
-                    per = game["shuttles"] * st.session_state.shuttle_price / np_
-                    st.caption(
-                        f"{game['shuttles']} shuttle(s) × {st.session_state.shuttle_price:,.0f} "
-                        f"÷ {np_} = **{per:,.2f} THB each**"
-                    )
-
-    # ---- End of day: submit to sheet ---------------------------------------
     st.divider()
-    st.subheader("📤 End of Day · Submit to Sheet")
 
-    present_names = [n for n, v in st.session_state.attendance.items() if v]
+    # ---- Add a new game ----
+    st.subheader("➕ Add a Game")
+
+    if not present_names:
+        st.caption("Check players in above first.")
+    else:
+        # Find next game number
+        next_game = len(live_games) + 1
+        st.markdown(f"**Game {next_game}** — who played?")
+
+        # Player selector — use multiselect for flexibility
+        selected_players = st.multiselect(
+            "Select players for this game",
+            options=present_names,
+            key="add_game_players",
+        )
+
+        shuttle_count = st.number_input(
+            "Shuttles used",
+            min_value=0, max_value=20, value=1, step=1,
+            key="add_game_shuttles",
+        )
+
+        col_add, col_undo = st.columns(2)
+        with col_add:
+            if st.button("🎯 Add game", type="primary", use_container_width=True):
+                if not selected_players:
+                    st.warning("Select at least one player!")
+                else:
+                    ok = add_live_game(
+                        st.session_state.session_date,
+                        list(selected_players),
+                        shuttle_count,
+                    )
+                    if ok:
+                        st.success(f"Game {next_game} added! Everyone can see it now.")
+                        st.rerun()
+        with col_undo:
+            if st.button("↩️ Undo last", use_container_width=True):
+                if live_games:
+                    ok = delete_last_game(st.session_state.session_date)
+                    if ok:
+                        st.rerun()
+                else:
+                    st.info("No games to undo.")
+
+    st.divider()
+
+    # ---- End of day: submit to monthly tab ----------------------------------
+    st.subheader("📤 End of Day · Submit to Monthly Tab")
+
     n_present = len(present_names)
-    total_shuttle_cost = sum(
-        g.get("shuttles", 0) for g in st.session_state.games
-    ) * st.session_state.shuttle_price
-    grand_total = total_court_cost + total_shuttle_cost
+    total_shuttle_cost = sum(g["shuttles"] for g in live_games) * st.session_state.shuttle_price
+    court_hours_total = sum(st.session_state.court_hours.values())
+    court_cost = court_hours_total * COURT_HOUR_RATE
+    grand_total = court_cost + total_shuttle_cost
 
     # Preview
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Players", n_present)
-    m2.metric("Court", f"{total_court_cost:,.0f} THB")
+    m2.metric("Court", f"{court_cost:,.0f} THB")
     m3.metric("Shuttles", f"{total_shuttle_cost:,.0f} THB")
-    m4.metric("Total", f"{grand_total:,.0f} THB")
-
-    st.caption(
-        f"Submits to the **{get_month_tab(st.session_state.session_date)}** tab "
-        f"under date **{st.session_state.session_date}**."
-        " All games, court hours, and totals will be saved."
-    )
 
     if st.button("📥 Submit day", type="primary", use_container_width=True):
         with st.spinner("Saving to Google Sheets…"):
             tab = get_month_tab(st.session_state.session_date)
             ok = submit_day_to_sheet(
-                recorded_games=st.session_state.games,
+                recorded_games=live_games,
                 session_date=st.session_state.session_date,
                 court_hours=st.session_state.court_hours,
                 attendance=st.session_state.attendance,
