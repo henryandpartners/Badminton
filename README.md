@@ -15,8 +15,8 @@ phone browser court-side.
 
 | View | What it does |
 |------|--------------|
-| 🏟️ **Live Tracker** | Toggle player check-in, giant ➕/➖ shuttle counter, and **per-game player selection** (pick who played each game), plus the court fee per person. |
-| 🧾 **Split** | Each player pays `court fee + their shuttle share`; the day's shuttle cost is split across games and shared among each game's players. Writes each row to the `Payments` tab. |
+| 🏟️ **Live Tracker** | Toggle player check-in, set **hours per court** (courts 9 & 10, 1/2/3h), and add games with **per-game player selection + shuttles used**. |
+| 🧾 **Split** | Each player pays `court share + shuttle share`; court cost is split equally, shuttle cost is per-game among who played. Writes each row to the `Payments` tab. |
 | 📥 **Slip Verify** | Drag-and-drop a JPG/PNG slip → OCR reads the amount → it's matched to the player who owes it → you confirm → their row flips `Pending → Paid`. Includes a manual-reconcile fallback. |
 | 👥 **Roster** | Read-only list of players, read live from the `ผู้เล่น` worksheet. |
 | 📊 **History** | Per-player and per-session summaries + outstanding-balance chart from the `Payments` tab. |
@@ -33,8 +33,8 @@ The app works against an existing Thai badminton sheet:
 
 **`Payments`** (created and owned by the app)
 
-| Date | Player | GamesPlayed | CourtFee | ShuttleShare | AmountDue | PaymentStatus |
-|------|--------|-------------|----------|--------------|-----------|---------------|
+| Date | Player | GamesPlayed | CourtShare | ShuttleShare | AmountDue | PaymentStatus |
+|------|--------|-------------|------------|--------------|-----------|---------------|
 
 The app **never** writes to the existing monthly attendance tabs or the
 dashboard — only to its own `Payments` tab.
@@ -66,18 +66,17 @@ template is tracked.
 
 ## How the split works
 
-Each checked-in player owes a **flat court fee** (default 80 THB) plus a
-**shuttle share**:
+Each checked-in player owes a **court share** plus a **shuttle share**:
 
 ```
-Court    = court_fee_per_person                       (per checked-in player)
+Court    = (sum of hours booked across courts 9 & 10) × 155 THB/hour/court,
+           split equally among all checked-in players.
 
-Shuttle  = total_shuttle_cost split across games; within each game the cost is
-           shared equally among the players who played it. A player's shuttle
-           share is the sum of their per-game shares.
-           (If no games are recorded, shuttles are split equally instead.)
+Shuttle  = each game's cost (shuttles × 100 THB) shared equally among that
+           game's players; a player's shuttle share sums their per-game shares.
+           e.g. 1 shuttle, 4 players → 25 THB each.
 
-Amount Due = Court + Shuttle share
+Amount Due = Court share + Shuttle share
 ```
 
 So playing more games — or games with fewer people — costs more. Locking writes
