@@ -90,14 +90,9 @@ def _get_pg_conn():
     # Supabase requires SSL — add sslmode if not present
     if "sslmode" not in url:
         url += "&sslmode=require" if "?" in url else "?sslmode=require"
-    try:
-        conn = psycopg2.connect(url)
-        conn.autocommit = False
-        return conn
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not connect to PostgreSQL at {url.split('@')[-1].split('?')[0]}: {e}"
-        ) from e
+    conn = psycopg2.connect(url)
+    conn.autocommit = False
+    return conn
 
 
 def _fetchall(conn, sql: str, params: tuple = ()) -> list[dict]:
