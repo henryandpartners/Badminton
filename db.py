@@ -135,8 +135,17 @@ def get_engine():
         # Supabase/Postgres URLs sometimes come as postgres:// — normalise.
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql://", 1)
-        connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-        _engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
+        if url.startswith("sqlite"):
+            _engine = create_engine(
+                url, connect_args={"check_same_thread": False}, pool_pre_ping=True
+            )
+        else:
+            # Postgres/Supabase: connect through the transaction pooler
+            # (pgbouncer). Don't keep a client-side pool — let pgbouncer pool —
+            # so connections can't go stale while a free-tier host sleeps.
+            from sqlalchemy.pool import NullPool
+
+            _engine = create_engine(url, poolclass=NullPool)
     return _engine
 
 
