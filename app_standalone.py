@@ -1,10 +1,13 @@
 """
 🏸 Badminton Tracker — Standalone (No Google Sheets)
 
-A fully self-contained version that stores everything in a local SQLite DB.
-No Google Sheets API needed. All data is in .badminton.db.
+A fully self-contained version that stores everything in a local database.
+Supports SQLite (local dev) and PostgreSQL (Streamlit Cloud).
 
-Run with:  streamlit run app_standalone.py
+To use PostgreSQL on Streamlit Cloud, set a DATABASE_URL secret:
+  postgresql://user:pass@host:5432/dbname
+
+Run locally with:  streamlit run app_standalone.py
 """
 from __future__ import annotations
 
@@ -581,7 +584,7 @@ def main() -> None:
     with tab4:
         view_export()
 
-    st.caption("Powered by local SQLite database · Data never leaves your machine")
+    st.caption(f"Powered by {sdb.get_db_info()['type']} database · Data never leaves your machine")
 
 
 if __name__ == "__main__":

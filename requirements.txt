@@ -11,6 +11,10 @@ google-auth>=2.30.0
 # --- Data handling ----------------------------------------------------------
 pandas>=2.0.0
 
+# --- Database (PostgreSQL for Streamlit Cloud, SQLite for local) ------------
+# psycopg2-binary is the easy-install wheel — use psycopg2 on Linux for perf
+psycopg2-binary>=2.9.0
+
 # --- Slip reading (local OCR) -----------------------------------------------
 # Requires the `tesseract-ocr` system binary too — see packages.txt
 # (Streamlit Community Cloud installs it from that file automatically).
