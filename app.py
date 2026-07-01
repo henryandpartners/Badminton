@@ -415,16 +415,23 @@ def delete_last_game(session_date: dt.date) -> bool:
 
 # ── End-of-day: submit full block to monthly tab ──────────────────────
 
+def _find_session_start_row(ws, date_str: str) -> int | None:
+    """Scan column A for the date header matching *date_str*, return its 1-indexed row."""
+    col_a = ws.range(f"A1:A500")
+    for cell in col_a:
+        if cell.value and cell.value.strip().startswith(date_str):
+            return cell.row
+    return None
+
+
 def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours: dict,
                         attendance: dict, shuttle_price: float) -> bool:
-    """Submit the entire day to the monthly tab, matching the existing sheet format.
+    """Submit the entire day to the monthly tab.
 
-    Writes a block per date with:
-      Row 0: Date header  (e.g. "2026-07-01 จันพุธ - สนาม 9 & 10 (20:00-23:00)")
-      Row 1: Column headers (ผู้เล่น, ประเภท, เช็คอิน, เกม1..เกม15, จำนวนเกม, etc.)
-      Rows 2+: Each player with their game checkboxes + shuttle/court costs
-      Summary: รวมเซสชัน
-      Court section: ค่าเช่าสนาม → court hours table
+    Finds the existing session block for *session_date* in the month tab by
+    scanning the date header row. If found, overwrites player data in place
+    (rows below the column-header row). If not found (new date), appends a
+    complete block at the bottom.
     """
     conn = get_connection()
     tab = get_month_tab(session_date)
@@ -454,10 +461,6 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
                 if nm and nm != name_col:
                     player_types[nm] = tp
 
-    # Court usage
-    total_court_hours = sum(court_hours.values())
-    total_court_cost = total_court_hours * COURT_HOUR_RATE
-
     # Game analysis
     player_game_count = {p: 0 for p in present_names}
     player_shuttle_cost = {p: 0.0 for p in present_names}
@@ -472,36 +475,14 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
 
     total_shuttle_cost = sum(player_shuttle_cost.values())
 
-    # Build the block rows
-    block = []
+    # ── Build the player-data rows for all roster players ──
     blank = [""] * 26
-
-    # Row 0: Date header
-    date_header = f"{date_str} {day_name} - สนาม 9 & 10 (20:00-23:00)"
-    row0 = blank.copy()
-    row0[0] = date_header
-    block.append(row0)
-
-    # Row 1: Column headers
-    row1 = blank.copy()
-    headers = {
-        0: "ผู้เล่น", 1: "ประเภท", 2: "เช็คอิน",
-        3: "เกม1", 4: "เกม2", 5: "เกม3", 6: "เกม4", 7: "เกม5",
-        8: "เกม6", 9: "เกม7", 10: "เกม8", 11: "เกม9", 12: "เกม10",
-        13: "เกม11", 14: "เกม12", 15: "เกม13", 16: "เกม14", 17: "เกม15",
-        18: "จำนวนเกม", 19: "ค่าลูก", 20: "ค่าสนามขาจร", 21: "ยอดรวม",
-        22: "โอน", 23: "เงินสด", 24: "จ่ายแล้ว", 25: "ค้างชำระ"
-    }
-    for col, h in headers.items():
-        row1[col] = h
-    block.append(row1)
-
-    # Player rows
-    for player in present_names:
+    player_rows = []
+    for player in sorted(player_types.keys()):
         row = blank.copy()
         row[0] = player
         row[1] = player_types.get(player, "ขาจร")
-        row[2] = "TRUE"
+        row[2] = "TRUE" if player in present_names else "FALSE"
 
         games_played = 0
         for gi, g in enumerate(recorded_games):
@@ -513,80 +494,153 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
         row[18] = str(games_played)
         row[19] = f"{player_shuttle_cost.get(player, 0):.2f}"
 
-        # Flat court fee: 80 THB per person (for both ประจำ and ขาจร)
         court_per_player = 80.0
-        row[20] = f"{court_per_player:.2f}"
-        row[21] = f"{player_shuttle_cost.get(player, 0) + court_per_player:.2f}"
+        row[20] = f"{court_per_player:.2f}" if player in present_names else "0"
+        row[21] = f"{player_shuttle_cost.get(player, 0) + court_per_player:.2f}" if player in present_names else f"{player_shuttle_cost.get(player, 0):.2f}"
 
         row[22] = "FALSE"
         row[24] = "0"
         row[25] = "0"
-        block.append(row)
-
-    # Summary row
-    total_court_fees = n_present * 80.0
-    summary = blank.copy()
-    summary[0] = "รวมเซสชัน"
-    summary[18] = str(sum(player_game_count.values()))
-    summary[19] = f"{total_shuttle_cost:.2f}"
-    summary[20] = f"{total_court_fees:.2f}"
-    summary[21] = f"{total_shuttle_cost + total_court_fees:.2f}"
-    summary[24] = "0"
-    summary[25] = "0"
-    block.append(summary)
-
-    block.append(blank.copy())  # spacer
-
-    # Court section (flat fee: 80 THB per player)
-    court_header = blank.copy()
-    court_header[0] = "ค่าเช่าสนาม (80 บาท/คน)"
-    block.append(court_header)
-
-    court_cols = blank.copy()
-    court_cols[0] = "สนาม"
-    court_cols[1] = "จำนวนผู้เล่น"
-    court_cols[2] = "ค่าธรรมเนียม/คน"
-    court_cols[3] = "รวม"
-    block.append(court_cols)
-
-    for court_id in ["9", "10"]:
-        cr = blank.copy()
-        cr[0] = f"สนาม {court_id}"
-        h = court_hours.get(court_id, 0)
-        cr[1] = str(n_present)
-        cr[2] = "80"
-        cr[3] = f"{n_present * 80.0:.2f}"
-        block.append(cr)
-
-    court_total = blank.copy()
-    court_total[0] = "รวมค่าสนาม"
-    court_total[2] = f"{n_present * 80.0:.2f}"
-    block.append(court_total)
-
-    block.append(blank.copy())
+        player_rows.append(row)
 
     try:
         ws = _get_gspread_worksheet(tab)
-        # Find the next empty row (after existing content)
-        existing = conn.read(worksheet=tab, ttl=0)
-        if existing is not None and not existing.empty:
-            existing_df = existing.dropna(how="all")
-            start_row = len(existing_df) + 2
-        else:
-            start_row = 1
-        # Update a range of cells starting at the computed start_row
-        n_rows = len(block)
-        n_cols = max(len(r) for r in block) if block else 1
-        end_col_letter = chr(64 + n_cols) if n_cols <= 26 else "Z"
-        cell_range = f"A{start_row}:{end_col_letter}{start_row + n_rows - 1}"
-        cell_list = ws.range(cell_range)
-        idx = 0
-        for row in block:
-            for val in row:
-                cell_list[idx].value = val
+
+        # Find the date-header row in the sheet
+        header_row = _find_session_start_row(ws, date_str)
+
+        if header_row is not None:
+            # ── Existing block found — overwrite everything from player rows
+            # through summary + court section ──
+            # Build the full overwrite block: player rows + summary + court
+            full_block = list(player_rows)
+
+            total_court_fees = n_present * 80.0
+            summary = blank.copy()
+            summary[0] = "รวมเซสชัน"
+            summary[18] = str(sum(player_game_count.values()))
+            summary[19] = f"{total_shuttle_cost:.2f}"
+            summary[20] = f"{total_court_fees:.2f}"
+            summary[21] = f"{total_shuttle_cost + total_court_fees:.2f}"
+            summary[24] = "0"
+            summary[25] = "0"
+            full_block.append(summary)
+            full_block.append(blank.copy())
+
+            court_header = blank.copy()
+            court_header[0] = "ค่าเช่าสนาม (80 บาท/คน)"
+            full_block.append(court_header)
+            court_cols = blank.copy()
+            court_cols[0] = "สนาม"
+            court_cols[1] = "จำนวนผู้เล่น"
+            court_cols[2] = "ค่าธรรมเนียม/คน"
+            court_cols[3] = "รวม"
+            full_block.append(court_cols)
+            for court_id in ["9", "10"]:
+                cr = blank.copy()
+                cr[0] = f"สนาม {court_id}"
+                cr[1] = str(n_present)
+                cr[2] = "80"
+                cr[3] = f"{n_present * 80.0:.2f}"
+                full_block.append(cr)
+            court_total = blank.copy()
+            court_total[0] = "รวมค่าสนาม"
+            court_total[2] = f"{n_present * 80.0:.2f}"
+            full_block.append(court_total)
+            # Leave the spacer — the next block's date header is a clear boundary
+
+            start_row = header_row + 2  # skip date header + column headers
+            n_rows = len(full_block)
+            end_row = start_row + n_rows - 1
+            cell_range = f"A{start_row}:Z{end_row}"
+            cell_list = ws.range(cell_range)
+            idx = 0
+            for row_values in full_block:
+                for val in row_values:
+                    cell_list[idx].value = val
+                    idx += 1
+            # Pad remaining cells in the range with empty string
+            while idx < len(cell_list):
+                cell_list[idx].value = ""
                 idx += 1
-        ws.update_cells(cell_list, value_input_option="USER_ENTERED")
-        return True
+            ws.update_cells(cell_list, value_input_option="USER_ENTERED")
+            return True
+        else:
+            # ── No existing block — append full block at the bottom ──
+            existing = conn.read(worksheet=tab, ttl=0)
+            if existing is not None and not existing.empty:
+                existing_df = existing.dropna(how="all")
+                start_row = len(existing_df) + 2
+            else:
+                start_row = 1
+
+            block = []
+            date_header = f"{date_str} {day_name} - สนาม 9 & 10 (20:00-23:00)"
+            row0 = blank.copy()
+            row0[0] = date_header
+            block.append(row0)
+
+            row1 = blank.copy()
+            headers = {
+                0: "ผู้เล่น", 1: "ประเภท", 2: "เช็คอิน",
+                3: "เกม1", 4: "เกม2", 5: "เกม3", 6: "เกม4", 7: "เกม5",
+                8: "เกม6", 9: "เกม7", 10: "เกม8", 11: "เกม9", 12: "เกม10",
+                13: "เกม11", 14: "เกม12", 15: "เกม13", 16: "เกม14", 17: "เกม15",
+                18: "จำนวนเกม", 19: "ค่าลูก", 20: "ค่าสนามขาจร", 21: "ยอดรวม",
+                22: "โอน", 23: "เงินสด", 24: "จ่ายแล้ว", 25: "ค้างชำระ"
+            }
+            for col, h in headers.items():
+                row1[col] = h
+            block.append(row1)
+            block.extend(player_rows)
+
+            total_court_fees = n_present * 80.0
+            summary = blank.copy()
+            summary[0] = "รวมเซสชัน"
+            summary[18] = str(sum(player_game_count.values()))
+            summary[19] = f"{total_shuttle_cost:.2f}"
+            summary[20] = f"{total_court_fees:.2f}"
+            summary[21] = f"{total_shuttle_cost + total_court_fees:.2f}"
+            summary[24] = "0"
+            summary[25] = "0"
+            block.append(summary)
+            block.append(blank.copy())
+
+            court_header = blank.copy()
+            court_header[0] = "ค่าเช่าสนาม (80 บาท/คน)"
+            block.append(court_header)
+            court_cols = blank.copy()
+            court_cols[0] = "สนาม"
+            court_cols[1] = "จำนวนผู้เล่น"
+            court_cols[2] = "ค่าธรรมเนียม/คน"
+            court_cols[3] = "รวม"
+            block.append(court_cols)
+            for court_id in ["9", "10"]:
+                cr = blank.copy()
+                cr[0] = f"สนาม {court_id}"
+                cr[1] = str(n_present)
+                cr[2] = "80"
+                cr[3] = f"{n_present * 80.0:.2f}"
+                block.append(cr)
+            court_total = blank.copy()
+            court_total[0] = "รวมค่าสนาม"
+            court_total[2] = f"{n_present * 80.0:.2f}"
+            block.append(court_total)
+            block.append(blank.copy())
+
+            n_rows = len(block)
+            n_cols = max(len(r) for r in block) if block else 1
+            end_col_letter = chr(64 + n_cols) if n_cols <= 26 else "Z"
+            cell_range = f"A{start_row}:{end_col_letter}{start_row + n_rows - 1}"
+            cell_list = ws.range(cell_range)
+            idx = 0
+            for row_values in block:
+                for val in row_values:
+                    cell_list[idx].value = val
+                    idx += 1
+            ws.update_cells(cell_list, value_input_option="USER_ENTERED")
+            return True
+
     except Exception as exc:
         st.error(f"Could not submit to tab '{tab}': {exc}")
         return False
