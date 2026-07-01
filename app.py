@@ -37,6 +37,7 @@ import re
 
 import gspread
 import pandas as pd
+import time
 import streamlit as st
 
 # --- Optional third-party imports are guarded so the app still boots and shows
@@ -52,6 +53,23 @@ try:
 except Exception:  # pragma: no cover - import guard
     pytesseract = None  # type: ignore
     Image = None  # type: ignore
+
+
+# =============================================================================
+# Retry decorator for Google API 429 rate-limit errors
+# =============================================================================
+def gsheets_retry(fn, max_attempts=3):
+    """Call *fn* with retry + exponential backoff on 429 errors."""
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except gspread.exceptions.APIError as exc:
+            if "429" in str(exc) and attempt < max_attempts - 1:
+                wait = 2 ** (attempt + 1) * 5  # 10s, 20s, 40s
+                st.warning(f"Google API rate limited. Retrying in {wait}s…")
+                time.sleep(wait)
+                continue
+            raise
 
 
 # =============================================================================
@@ -85,10 +103,11 @@ DEFAULT_SHUTTLE_PRICE = 100.0      # THB per shuttle
 STATUS_PENDING = "Pending"
 STATUS_PAID = "Paid"
 
-# Cache TTL (seconds) for sheet reads. Short enough for live updates, long
-# enough to not hammer the Google API (60 reads/min quota).
-READ_TTL = 10
-LIVE_TTL = 5     # live attendance/games — needs to be near-realtime
+# Cache TTL (seconds) for sheet reads. Generous to stay under the 60 reads/min
+# Google Sheets API quota. For 5 users × 3 views each = 15 reads/min; 30s TTL
+# keeps us well under quota with plenty of headroom.
+READ_TTL = 60
+LIVE_TTL = 20     # live attendance/games refresh every 20s
 
 st.set_page_config(
     page_title="🏸 Badminton Tracker",
@@ -317,16 +336,13 @@ def save_live_checkin(session_date: dt.date, attendance: dict[str, bool]) -> boo
             # Build a range that covers all columns we need
             end_col = len(new_row)
             cell_range = f"A{row_to_overwrite}:{chr(64 + end_col)}{row_to_overwrite}"
-            cell_list = ws.range(cell_range)
+            cell_list = gsheets_retry(lambda: ws.range(cell_range))
             for i, val in enumerate(new_row):
                 cell_list[i].value = val
-            # Clear any extra cells that might remain from a longer previous row
-            for i in range(len(new_row), len(cell_list)):
-                cell_list[i].value = ""
-            ws.update_cells(cell_list, value_input_option="USER_ENTERED")
+            gsheets_retry(lambda: ws.update_cells(cell_list, value_input_option="USER_ENTERED"))
         else:
             # Append a new row
-            ws.append_row(new_row, value_input_option="USER_ENTERED")
+            gsheets_retry(lambda: ws.append_row(new_row, value_input_option="USER_ENTERED"))
         return True
     except Exception as exc:
         st.error(f"Could not save attendance: {exc}")
@@ -381,7 +397,7 @@ def add_live_game(session_date: dt.date, players: list[str], shuttles: int) -> b
                     next_num = max(nums) + 1
 
         row = [date_str, next_num, ", ".join(players), shuttles, "app"]
-        ws.append_row(row, value_input_option="USER_ENTERED")
+        gsheets_retry(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
         return True
     except Exception as exc:
         st.error(f"Could not add game: {exc}")
@@ -408,7 +424,7 @@ def delete_last_game(session_date: dt.date) -> bool:
         last_idx = today_idxs[-1]
         row_num = last_idx + 2  # 1-indexed + header row
         ws = _get_gspread_worksheet(LIVE_GAMES_WS)
-        ws.delete_rows(row_num)
+        gsheets_retry(lambda: ws.delete_rows(row_num))
         return True
     except Exception:
         return False
@@ -554,7 +570,7 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
             n_rows = len(full_block)
             end_row = start_row + n_rows - 1
             cell_range = f"A{start_row}:Z{end_row}"
-            cell_list = ws.range(cell_range)
+            cell_list = gsheets_retry(lambda: ws.range(cell_range))
             idx = 0
             for row_values in full_block:
                 for val in row_values:
@@ -564,7 +580,7 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
             while idx < len(cell_list):
                 cell_list[idx].value = ""
                 idx += 1
-            ws.update_cells(cell_list, value_input_option="USER_ENTERED")
+            gsheets_retry(lambda: ws.update_cells(cell_list, value_input_option="USER_ENTERED"))
             return True
         else:
             # ── No existing block — append full block at the bottom ──
@@ -633,13 +649,13 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
             n_cols = max(len(r) for r in block) if block else 1
             end_col_letter = chr(64 + n_cols) if n_cols <= 26 else "Z"
             cell_range = f"A{start_row}:{end_col_letter}{start_row + n_rows - 1}"
-            cell_list = ws.range(cell_range)
+            cell_list = gsheets_retry(lambda: ws.range(cell_range))
             idx = 0
             for row_values in block:
                 for val in row_values:
                     cell_list[idx].value = val
                     idx += 1
-            ws.update_cells(cell_list, value_input_option="USER_ENTERED")
+            gsheets_retry(lambda: ws.update_cells(cell_list, value_input_option="USER_ENTERED"))
             return True
 
     except Exception as exc:
