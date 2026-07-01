@@ -85,9 +85,10 @@ DEFAULT_SHUTTLE_PRICE = 100.0      # THB per shuttle
 STATUS_PENDING = "Pending"
 STATUS_PAID = "Paid"
 
-# Cache TTL (seconds) for sheet reads. Short so the court view stays "live"
-# without hammering the Google API on every rerun.
-READ_TTL = 5
+# Cache TTL (seconds) for sheet reads. Short enough for live updates, long
+# enough to not hammer the Google API (60 reads/min quota).
+READ_TTL = 10
+LIVE_TTL = 5     # live attendance/games — needs to be near-realtime
 
 st.set_page_config(
     page_title="🏸 Badminton Tracker",
@@ -268,7 +269,7 @@ def read_live_checkin(session_date: dt.date) -> dict[str, bool]:
     conn = get_connection()
     date_str = session_date.isoformat()
     try:
-        df = conn.read(worksheet=LIVE_CHECKIN_WS, ttl=0)
+        df = conn.read(worksheet=LIVE_CHECKIN_WS, ttl=LIVE_TTL)
         if df is None or df.empty:
             return {}
         df = df.dropna(how="all")
@@ -299,7 +300,7 @@ def save_live_checkin(session_date: dt.date, attendance: dict[str, bool]) -> boo
     try:
         ws = _get_gspread_worksheet(LIVE_CHECKIN_WS)
         # Read existing rows to find a date match
-        df = conn.read(worksheet=LIVE_CHECKIN_WS, ttl=0)
+        df = conn.read(worksheet=LIVE_CHECKIN_WS, ttl=LIVE_TTL)
         row_to_overwrite = None
         if df is not None and not df.empty:
             df = df.dropna(how="all")
@@ -337,7 +338,7 @@ def read_live_games(session_date: dt.date) -> list[dict]:
     conn = get_connection()
     date_str = session_date.isoformat()
     try:
-        df = conn.read(worksheet=LIVE_GAMES_WS, ttl=0)
+        df = conn.read(worksheet=LIVE_GAMES_WS, ttl=LIVE_TTL)
         if df is None or df.empty:
             return []
         df = df.dropna(how="all")
@@ -370,7 +371,7 @@ def add_live_game(session_date: dt.date, players: list[str], shuttles: int) -> b
 
         # Read existing game numbers (via GSheetsConnection.read for simpler parsing)
         conn = get_connection()
-        existing = conn.read(worksheet=LIVE_GAMES_WS, ttl=0)
+        existing = conn.read(worksheet=LIVE_GAMES_WS, ttl=LIVE_TTL)
         next_num = 1
         if existing is not None and not existing.empty:
             existing = existing.dropna(how="all")
@@ -392,7 +393,7 @@ def delete_last_game(session_date: dt.date) -> bool:
     date_str = session_date.isoformat()
     try:
         conn = get_connection()
-        df = conn.read(worksheet=LIVE_GAMES_WS, ttl=0)
+        df = conn.read(worksheet=LIVE_GAMES_WS, ttl=LIVE_TTL)
         if df is None or df.empty:
             return False
         df = df.dropna(how="all")
@@ -448,7 +449,7 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
     n_present = len(present_names)
 
     # Read full roster to get player types (ประจำ/ขาจร)
-    roster_data = conn.read(worksheet=ROSTER_WS, ttl=0)
+    roster_data = conn.read(worksheet=ROSTER_WS, ttl=READ_TTL)
     player_types = {}
     if roster_data is not None and not roster_data.empty:
         df = roster_data.dropna(how="all")
@@ -567,7 +568,7 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
             return True
         else:
             # ── No existing block — append full block at the bottom ──
-            existing = conn.read(worksheet=tab, ttl=0)
+            existing = conn.read(worksheet=tab, ttl=READ_TTL)
             if existing is not None and not existing.empty:
                 existing_df = existing.dropna(how="all")
                 start_row = len(existing_df) + 2
