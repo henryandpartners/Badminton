@@ -284,3 +284,35 @@ def get_stats() -> dict:
     ).fetchone()
     conn.close()
     return dict(row)
+
+
+def update_payment_status(session_id: int, player_name: str, status: str) -> bool:
+    """Mark a player as Paid/Pending for a given session."""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE session_players SET payment_status = ? WHERE session_id = ? AND player_name = ?",
+            (status, session_id, player_name),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def set_player_court_fee(session_id: int, player_name: str, court_fee: float) -> bool:
+    """Update a player's court fee (used when editing splits mid-session)."""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE session_players SET court_fee = ?, total = shuttle_cost + ? WHERE session_id = ? AND player_name = ?",
+            (court_fee, court_fee, session_id, player_name),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
