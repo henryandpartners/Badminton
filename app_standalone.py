@@ -554,25 +554,27 @@ def view_export() -> None:
 # =============================================================================
 # Main
 # =============================================================================
-def main() -> None:
+def main():
     st.set_page_config(
-        page_title="🏸 Badminton Tracker",
+        page_title="Badminton Tracker",
         page_icon="🏸",
         layout="centered",
         initial_sidebar_state="collapsed",
     )
 
-    sdb.init_db()
+    # Show database connection status
+    try:
+        sdb.init_db()
+        db_info = sdb.get_db_info()
+        if db_info["type"] == "PostgreSQL":
+            st.success(f"✅ Connected to cloud database ({db_info['host']})")
+        else:
+            st.warning("⚠️ Running on local SQLite — data will reset on redeploy")
+    except Exception as e:
+        st.error(f"❌ Database connection failed: {e}")
+        st.stop()
+
     init_state()
-
-    st.title("🏸 Badminton Tracker")
-
-    # Show which database is active
-    db_info = sdb.get_db_info()
-    if db_info["type"] == "PostgreSQL":
-        st.success(f"✅ Connected to cloud database ({db_info['host']})")
-    else:
-        st.warning("⚠️ Running on local SQLite — data will reset on redeploy")
     st.caption("Standalone — no Google Sheets needed")
 
     tab1, tab2, tab3, tab4 = st.tabs([
