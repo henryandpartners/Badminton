@@ -46,7 +46,8 @@ def _get_database_url() -> str:
 
     if HAS_STREAMLIT:
         try:
-            url = st.secrets.get("database_url", "")
+            # Try exact case first, then fall back to lowercase
+            url = st.secrets.get("DATABASE_URL", "") or st.secrets.get("database_url", "")
             if url:
                 _DB_URL = url
                 return _DB_URL
