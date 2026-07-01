@@ -16,3 +16,8 @@ env/
 .DS_Store
 .idea/
 .vscode/
+
+# Local SQLite summary DB (auto-generated per deployment)
+.badminton.db
+.badminton.db-shm
+.badminton.db-wal
