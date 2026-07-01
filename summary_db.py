@@ -229,7 +229,10 @@ def init_db() -> None:
     conn = _get_conn()
     try:
         if _DB_URL.startswith("postgresql"):
-            _execute(conn, PG_SCHEMA)
+            for statement in PG_SCHEMA.strip().split(";"):
+                stmt = statement.strip()
+                if stmt:
+                    _execute(conn, stmt)
         else:
             for statement in SQLITE_SCHEMA.strip().split(";"):
                 stmt = statement.strip()
