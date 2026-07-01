@@ -37,6 +37,7 @@ import re
 
 import gspread
 import pandas as pd
+import summary_db as sdb
 import time
 import streamlit as st
 
@@ -581,6 +582,12 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
                 cell_list[idx].value = ""
                 idx += 1
             gsheets_retry(lambda: ws.update_cells(cell_list, value_input_option="USER_ENTERED"))
+            # Save to local DB for fast summary/history reads
+            sdb.save_session(
+                session_date, day_name, court_hours, attendance,
+                player_types, recorded_games, shuttle_price,
+                player_game_count, player_shuttle_cost,
+            )
             return True
         else:
             # ── No existing block — append full block at the bottom ──
@@ -656,6 +663,12 @@ def submit_day_to_sheet(recorded_games: list, session_date: dt.date, court_hours
                     cell_list[idx].value = val
                     idx += 1
             gsheets_retry(lambda: ws.update_cells(cell_list, value_input_option="USER_ENTERED"))
+            # Save to local DB for fast summary/history reads
+            sdb.save_session(
+                session_date, day_name, court_hours, attendance,
+                player_types, recorded_games, shuttle_price,
+                player_game_count, player_shuttle_cost,
+            )
             return True
 
     except Exception as exc:
@@ -1176,81 +1189,104 @@ def view_roster(players: pd.DataFrame) -> None:
 
 
 # =============================================================================
-# VIEW 5 — Season History
+# VIEW 5 — Season History (powered by local SQLite DB)
 # =============================================================================
 def view_history() -> None:
     st.header("📊 Season History")
-    ledger = read_payments()
-    if ledger.empty:
-        st.info("No sessions recorded yet. Lock a session to start building history.")
+
+    if sdb.is_empty():
+        st.info(
+            "No sessions recorded yet. Use the Live Tracker tab to submit a session."
+        )
         return
 
-    led = ledger.copy()
-    led["AmountDue"] = pd.to_numeric(led["AmountDue"], errors="coerce").fillna(0.0)
-    led["GamesPlayed"] = pd.to_numeric(led["GamesPlayed"], errors="coerce").fillna(0)
-    status = led["PaymentStatus"].astype(str).str.lower()
-    led["_paid"] = status.eq(STATUS_PAID.lower())
+    stats = sdb.get_stats()
 
     # ---- Top-line season metrics -----------------------------------------
-    total_collected = led.loc[led["_paid"], "AmountDue"].sum()
-    total_outstanding = led.loc[~led["_paid"], "AmountDue"].sum()
-    n_sessions = led["Date"].astype(str).nunique()
     m1, m2, m3 = st.columns(3)
-    m1.metric("Sessions", n_sessions)
-    m2.metric("Collected", f"{total_collected:,.0f}")
-    m3.metric("Outstanding", f"{total_outstanding:,.0f}")
+    m1.metric("Sessions", stats["total_sessions"])
+    m2.metric("Collected", f"{stats['total_collected']:,.0f} THB")
+    m3.metric("Check-ins", stats["total_checkins"])
+
+    # ---- Per-session details (expandable) --------------------------------
+    st.subheader("📋 Per-session details")
+
+    sessions = sdb.get_session_summaries()
+    for sess in sessions:
+        label = f"{sess['date']} ({sess['day_name']}) — {sess['player_count']} players · {sess['game_count']} games · {sess['total_amount']:,.0f} THB"
+        with st.expander(label):
+            # Player breakdown
+            db_sess = sdb.get_session(sess["date"])
+            if db_sess:
+                players = sdb.get_session_players(db_sess["id"])
+                games = sdb.get_session_games(db_sess["id"])
+
+                if players:
+                    # Summary metrics
+                    cols = st.columns(4)
+                    cols[0].metric("🏸 Shuttles", f"{db_sess['total_shuttle_cost']:,.0f} THB")
+                    cols[1].metric("🏟️ Court", f"{db_sess['total_court_fees']:,.0f} THB")
+                    cols[2].metric("💰 Total", f"{db_sess['total_amount']:,.0f} THB")
+                    cols[3].metric("👤 Players", db_sess["player_count"])
+
+                    st.dataframe(
+                        [
+                            {
+                                "Player": p["player_name"],
+                                "Type": p["player_type"],
+                                "Games": p["games_played"],
+                                "Shuttle": f"{p['shuttle_cost']:.0f}",
+                                "Court": f"{p['court_fee']:.0f}",
+                                "Total": f"{p['total']:.0f}",
+                            }
+                            for p in players if p["attended"]
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                if games:
+                    st.caption(f"🏸 **{len(games)} games**")
+                    for g in games:
+                        st.markdown(
+                            f"Game {g['game_number']}: {g['players']} — "
+                            f"{g['shuttles']} shuttle(s)"
+                        )
 
     # ---- Per-player summary ----------------------------------------------
-    st.subheader("Per player")
-    per_player = (
-        led.groupby("Player")
-        .agg(
-            Sessions=("Date", "nunique"),
-            TotalDue=("AmountDue", "sum"),
-            Paid=("AmountDue", lambda s: s[led.loc[s.index, "_paid"]].sum()),
+    st.subheader("👥 Per-player totals")
+    player_summary = sdb.get_player_summary()
+    if player_summary:
+        st.dataframe(
+            [
+                {
+                    "Player": p["player_name"],
+                    "Type": p["player_type"],
+                    "Sessions": p["sessions"],
+                    "Games": p["total_games"],
+                    "Shuttle Cost": f"{p['total_shuttle']:,.0f}",
+                    "Court Fee": f"{p['total_court']:,.0f}",
+                    "Total Due": f"{p['total_due']:,.0f}",
+                }
+                for p in player_summary
+            ],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Shuttle Cost": st.column_config.TextColumn(width="small"),
+                "Court Fee": st.column_config.TextColumn(width="small"),
+                "Total Due": st.column_config.TextColumn(width="small"),
+            },
         )
-        .reset_index()
-    )
-    per_player["Outstanding"] = per_player["TotalDue"] - per_player["Paid"]
-    per_player = per_player.sort_values("Outstanding", ascending=False)
-    st.dataframe(
-        per_player,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "TotalDue": st.column_config.NumberColumn(format="%.2f"),
-            "Paid": st.column_config.NumberColumn(format="%.2f"),
-            "Outstanding": st.column_config.NumberColumn(format="%.2f"),
-        },
-    )
 
-    # ---- Per-session summary ---------------------------------------------
-    st.subheader("Per session")
-    per_session = (
-        led.groupby("Date")
-        .agg(
-            Players=("Player", "nunique"),
-            Games=("GamesPlayed", "max"),
-            Total=("AmountDue", "sum"),
-            Paid=("_paid", "sum"),
-        )
-        .reset_index()
-        .sort_values("Date", ascending=False)
-    )
-    st.dataframe(
-        per_session,
-        use_container_width=True,
-        hide_index=True,
-        column_config={"Total": st.column_config.NumberColumn(format="%.2f")},
-    )
-
-    # ---- Outstanding-by-player chart -------------------------------------
-    chart_data = per_player[per_player["Outstanding"] > 0].set_index("Player")[
-        ["Outstanding"]
-    ]
-    if not chart_data.empty:
-        st.subheader("Who still owes")
-        st.bar_chart(chart_data)
+        # Outstanding chart
+        chart_data = {
+            p["player_name"]: p["total_due"]
+            for p in player_summary if p["total_due"] > 0
+        }
+        if chart_data:
+            st.subheader("Who owes (total)")
+            st.bar_chart(chart_data)
 
 
 # =============================================================================
@@ -1258,6 +1294,7 @@ def view_history() -> None:
 # =============================================================================
 def main() -> None:
     inject_mobile_css()
+    sdb.init_db()
     init_state()
 
     st.title("🏸 Badminton Team Tracker")
