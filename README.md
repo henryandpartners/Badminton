@@ -1,45 +1,35 @@
-# 🏸 Badminton Team Tracker
+# 🏸 Badminton Tracker
 
-A mobile-optimised **Streamlit** web app for tracking on-court badminton
-sessions. It uses a **Google Sheet as the live backend** (read/write via
-`st-gsheets-connection`), splits each session's cost, and reconciles
-**bank-transfer slips** by reading the amount off the photo with **local OCR
-(Tesseract)** — no third-party API or keys required.
+A mobile-friendly **Streamlit** app for tracking badminton sessions, backed by a
+**database** (SQLite locally, or **Supabase/Postgres** in the cloud). Tracks
+daily check-ins, per-game players & shuttles, court hours, payments, and monthly
+summaries — with CSV export and a raw-data audit view so you can trace mistakes.
 
-Designed thumb-first: big high-contrast buttons and toggle chips that work on a
-phone browser court-side.
+No Google Sheets, no API keys required for local use.
 
 ---
 
 ## Features
 
-| View | What it does |
-|------|--------------|
-| 🏟️ **Live Tracker** | Toggle player check-in, set **hours per court** (courts 9 & 10, 1/2/3h), and add games with **per-game player selection + shuttles used**. |
-| 🧾 **Split** | Each player pays `court share + shuttle share`; court cost is split equally, shuttle cost is per-game among who played. Writes each row to the `Payments` tab. |
-| 📥 **Slip Verify** | Drag-and-drop a JPG/PNG slip → OCR reads the amount → it's matched to the player who owes it → you confirm → their row flips `Pending → Paid`. Includes a manual-reconcile fallback. |
-| 👥 **Roster** | Read-only list of players, read live from the `ผู้เล่น` worksheet. |
-| 📊 **History** | Per-player and per-session summaries + outstanding-balance chart from the `Payments` tab. |
+| Tab | What it does |
+|-----|--------------|
+| 📋 **Session** | Pick the date, set hours per court (9 & 10), check players in, add ad-hoc/guest players, and add games (pick who played + shuttles used). Edit or delete any submitted game. |
+| 💰 **Daily** | Per-player breakdown (games, shuttle cost, court fee, total) with a **✅ Paid** tickbox each. Exports the day to CSV. |
+| 📅 **Monthly** | Court-hours rented & rental cost, shuttles bought & cost, fees collected, and **net P&L**; per-player owed/paid/outstanding. CSV export. |
+| 🛒 **Shuttles** | Record shuttle purchases (qty × unit cost) for cost tracking. |
+| 👥 **Players** | Manage the roster; deactivate players (keeps their history). |
+| 🗄️ **Data** | Raw tables for auditing/tracing, each exportable to CSV. |
 
 ---
 
-## Google Sheet schema
+## Cost model
 
-The app works against an existing Thai badminton sheet:
+- **Court fee (what each player pays):** flat **80 THB / person / day**.
+- **Court rental cost (your venue expense):** **155 THB / court / hour** (courts 9 & 10, 1–3 h/day) — summed monthly.
+- **Shuttles:** **100 THB each**, split among a game's players → **25 THB each for a 4-player game**. A player's shuttle bill = sum of their per-game shares.
+- **Daily total per player = 80 + shuttle share.** Monthly **net** = fees collected − (court rental + shuttle purchases).
 
-**`ผู้เล่น`** (existing roster — **read only**)
-: Player names are read from the `ชื่อผู้เล่น` column. Member/casual type and
-  monthly fees are ignored.
-
-**`Payments`** (created and owned by the app)
-
-| Date | Player | GamesPlayed | CourtShare | ShuttleShare | AmountDue | PaymentStatus |
-|------|--------|-------------|------------|--------------|-----------|---------------|
-
-The app **never** writes to the existing monthly attendance tabs or the
-dashboard — only to its own `Payments` tab.
-
-> Share the Sheet with your service account's `client_email` (Editor access).
+All defaults live in `db.py` and are easy to change; court hours/fee/shuttle price are stored per session.
 
 ---
 
@@ -47,38 +37,30 @@ dashboard — only to its own `Payments` tab.
 
 ```bash
 pip install -r requirements.txt
-
-# Configure secrets (copy the template and fill in real values)
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-#   → paste your Google service-account JSON fields (slip OCR needs no keys)
-
-streamlit run app.py
+streamlit run app.py          # uses a local SQLite file, seeded with the roster
 ```
 
-On **Streamlit Community Cloud**, paste the contents of
-`secrets.toml.example` (filled in) into **App → Settings → Secrets** instead of
-committing a file.
+The starting roster (โรจน์, น้อย, ภูมี, …) is seeded automatically on first run.
 
-The real `.streamlit/secrets.toml` is git-ignored — only the `.example`
-template is tracked.
+### Deploy on Streamlit Cloud (with persistent data)
+
+Streamlit Cloud's disk is wiped on restart, so **use Supabase** (free Postgres)
+so your data survives:
+
+1. Create a Supabase project → **Project Settings → Database → Connection string (URI)** (use the pooling URI).
+2. In the deployed app → **Settings → Secrets**, add:
+   ```toml
+   [database]
+   url = "postgresql://USER:PASSWORD@HOST:PORT/postgres"
+   ```
+3. Deploy (repo + branch + `app.py`). Tables are created automatically on first run.
+
+Locally, no secrets are needed — it falls back to `sqlite:///badminton.db`.
 
 ---
 
-## How the split works
+## Data model
 
-Each checked-in player owes a **court share** plus a **shuttle share**:
-
-```
-Court    = (sum of hours booked across courts 9 & 10) × 155 THB/hour/court,
-           split equally among all checked-in players.
-
-Shuttle  = each game's cost (shuttles × 100 THB) shared equally among that
-           game's players; a player's shuttle share sums their per-game shares.
-           e.g. 1 shuttle, 4 players → 25 THB each.
-
-Amount Due = Court share + Shuttle share
-```
-
-So playing more games — or games with fewer people — costs more. Locking writes
-one `Payments` row per present player for that date; re-locking the same date is
-idempotent (it replaces that date's rows).
+`players` · `sessions` · `attendance` · `games` · `game_players` ·
+`shuttle_purchases` — see `db.py`. The database is the source of truth, so every
+number on screen can be traced back to raw rows in the **Data** tab.

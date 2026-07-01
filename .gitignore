@@ -1,7 +1,11 @@
-# Never commit populated secrets — only the sample template is tracked.
+# Secrets — never commit real credentials/connection strings
 .streamlit/secrets.toml
 *.secrets.toml
 service_account*.json
+
+# Local database (SQLite) — data lives in the DB, not the repo
+*.db
+badminton.db
 
 # Python
 __pycache__/

@@ -1,18 +1,8 @@
 # --- Core app ---------------------------------------------------------------
-# Pinned to the range this app was tested against (verified on 1.58.0).
 streamlit>=1.40.0,<1.59.0
-
-# --- Google Sheets live backend (st.connection("gsheets", ...)) -------------
-# st-gsheets-connection requires gspread<6, so pin within its supported range.
-st-gsheets-connection>=0.0.4
-gspread>=5.8.0,<6
-google-auth>=2.30.0
-
-# --- Data handling ----------------------------------------------------------
 pandas>=2.0.0
 
-# --- Slip reading (local OCR) -----------------------------------------------
-# Requires the `tesseract-ocr` system binary too — see packages.txt
-# (Streamlit Community Cloud installs it from that file automatically).
-pytesseract>=0.3.10
-Pillow>=10.0.0
+# --- Database layer ---------------------------------------------------------
+SQLAlchemy>=2.0.0
+# For Supabase / Postgres (not needed for the local SQLite default):
+psycopg2-binary>=2.9.0

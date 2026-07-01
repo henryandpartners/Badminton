@@ -1,781 +1,325 @@
 """
-🏸 Badminton Team Tracker
-=========================
-A mobile-optimised Streamlit frontend for tracking on-court badminton sessions,
-splitting costs, and reconciling bank-transfer slips against players by reading
-the received amount — all backed live by a Google Sheet.
+🏸 Badminton Tracker
+====================
+A mobile-friendly Streamlit app backed by a database (SQLite locally, or
+Supabase/Postgres in the cloud — see db.py). Tracks daily check-ins, per-game
+players & shuttles, court hours, payments, monthly summaries, and exports.
 
-Backend schema (Google Sheet)
------------------------------
-Worksheet "ผู้เล่น" (existing roster — READ ONLY):
-    Player names are read from the "ชื่อผู้เล่น" column. Member/casual type and
-    monthly fees are intentionally ignored — costs are split flat.
-
-Worksheet "Payments" (created and owned by this app):
-    | Date | Player | GamesPlayed | CourtShare | ShuttleShare |
-    | AmountDue | PaymentStatus |
-    One row per checked-in player, per session date. The app never writes to
-    the existing monthly attendance tabs or the dashboard.
-
-Cost model:
-  • Court: total court cost = (sum of hours booked across courts 9 & 10) ×
-    155 THB/hour/court, split equally among all checked-in players.
-  • Shuttles: each game's shuttle cost (shuttles × 100 THB) is shared equally
-    among that game's players; a player's shuttle bill sums their per-game shares.
-
-Reconciliation: players pay the organiser however they like; at end of day the
-Slip Verify tab reads each received slip's amount and matches it to who owes it.
-
-Run with:  streamlit run app.py
+Run:  streamlit run app.py
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import io
-import re
 
 import pandas as pd
 import streamlit as st
 
-# --- Optional third-party imports are guarded so the app still boots and shows
-# --- a friendly message if a dependency is missing in the deployment env. -----
-try:
-    from streamlit_gsheets import GSheetsConnection
-except Exception:  # pragma: no cover - import guard
-    GSheetsConnection = None  # type: ignore
+import db
 
-try:
-    import pytesseract
-    from PIL import Image
-except Exception:  # pragma: no cover - import guard
-    pytesseract = None  # type: ignore
-    Image = None  # type: ignore
+st.set_page_config(page_title="🏸 Badminton Tracker", page_icon="🏸", layout="centered")
 
 
-# =============================================================================
-# Configuration & constants
-# =============================================================================
-# Roster lives in the existing Thai "players" worksheet; we only read the name
-# column (member/casual type & fees are intentionally ignored — flat split).
-ROSTER_WS = "ผู้เล่น"
-ROSTER_NAME_COL = "ชื่อผู้เล่น"
-
-# The app writes its own daily split + payment status to a dedicated tab so it
-# never disturbs the existing monthly attendance tabs or the dashboard formulas.
-PAYMENTS_WS = "Payments"
-
-PAYMENTS_COLUMNS = [
-    "Date",
-    "Player",
-    "GamesPlayed",
-    "CourtShare",
-    "ShuttleShare",
-    "AmountDue",
-    "PaymentStatus",
-]
-
-# Courts and pricing.
-COURTS = ["9", "10"]               # court names available to book
-COURT_HOUR_RATE = 155.0            # THB per hour, per court
-COURT_HOUR_OPTIONS = [0, 1, 2, 3]  # bookable hours per court (0 = not used)
-DEFAULT_SHUTTLE_PRICE = 100.0      # THB per shuttle
-
-STATUS_PENDING = "Pending"
-STATUS_PAID = "Paid"
-
-# Cache TTL (seconds) for sheet reads. Short so the court view stays "live"
-# without hammering the Google API on every rerun.
-READ_TTL = 5
-
-st.set_page_config(
-    page_title="🏸 Badminton Tracker",
-    page_icon="🏸",
-    layout="centered",  # centred + mobile-first
-    initial_sidebar_state="collapsed",
-)
+# --- one-time DB init --------------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def _bootstrap():
+    db.init_db()
+    return True
 
 
-# =============================================================================
-# Mobile-first styling — big thumb-friendly buttons & high contrast
-# =============================================================================
-def inject_mobile_css() -> None:
+_bootstrap()
+
+
+def inject_css():
     st.markdown(
         """
         <style>
-        /* Make every button large, bold and easy to tap on a phone court-side */
-        .stButton > button {
-            width: 100%;
-            min-height: 3.25rem;
-            font-size: 1.15rem;
-            font-weight: 700;
-            border-radius: 14px;
-        }
-        /* Giant counter buttons get extra height + contrast */
-        div[data-testid="column"] .stButton > button {
-            min-height: 3.75rem;
-            font-size: 1.6rem;
-        }
-        /* Toggle chips: chunky tap target */
-        .stCheckbox, .stToggle { font-size: 1.1rem; }
-        /* Tighten default top padding so more fits above the fold on mobile */
-        .block-container { padding-top: 1.5rem; padding-bottom: 4rem; }
-        /* Metric values nice and large */
-        div[data-testid="stMetricValue"] { font-size: 2.2rem; }
+        .stButton > button { width:100%; min-height:3rem; font-size:1.1rem;
+            font-weight:700; border-radius:12px; }
+        .block-container { padding-top:1.2rem; padding-bottom:4rem; }
+        div[data-testid="stMetricValue"] { font-size:1.9rem; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-# =============================================================================
-# Google Sheets connection helpers (CRUD)
-# =============================================================================
-@st.cache_resource(show_spinner=False)
-def get_connection():
-    """Create (and cache) the GSheets connection object."""
-    if GSheetsConnection is None:
-        st.error(
-            "`st-gsheets-connection` is not installed. "
-            "Add it to requirements.txt and redeploy."
-        )
-        st.stop()
-    try:
-        return st.connection("gsheets", type=GSheetsConnection)
-    except Exception as exc:
-        st.error(
-            "Could not establish the Google Sheets connection. Check that "
-            "`[connections.gsheets]` in your secrets is filled in with a valid "
-            f"service-account key.\n\nDetails: {exc}"
-        )
-        st.stop()
+# --- helpers -----------------------------------------------------------------
+def player_maps(active_only=True):
+    ps = db.get_players(active_only=active_only)
+    id_to_name = dict(zip(ps["id"], ps["name"]))
+    name_to_id = dict(zip(ps["name"], ps["id"]))
+    return ps, id_to_name, name_to_id
 
 
-def read_players() -> pd.DataFrame:
-    """Read the player roster from the Thai 'ผู้เล่น' worksheet.
-
-    Reads only the name column, drops blanks / repeated headers, and
-    de-duplicates while preserving order. Returns a frame with a single
-    'Name' column (empty on failure).
-    """
-    conn = get_connection()
-    try:
-        df = conn.read(worksheet=ROSTER_WS, ttl=READ_TTL)
-        df = df.dropna(how="all")
-        # The roster's name column is the Thai header; fall back to first column.
-        if ROSTER_NAME_COL in df.columns:
-            names = df[ROSTER_NAME_COL]
-        else:
-            names = df.iloc[:, 0]
-        names = names.fillna("").astype(str).str.strip()
-        seen, ordered = set(), []
-        for n in names:
-            if not n or n == ROSTER_NAME_COL or n in seen:
-                continue  # skip blanks, repeated header rows, and duplicates
-            seen.add(n)
-            ordered.append(n)
-        return pd.DataFrame({"Name": ordered})
-    except Exception as exc:  # pragma: no cover - network/runtime guard
-        st.error(f"Could not read the '{ROSTER_WS}' worksheet: {exc}")
-        return pd.DataFrame(columns=["Name"])
-
-
-def read_payments() -> pd.DataFrame:
-    """Read the app-managed Payments tab. Returns an empty frame on failure."""
-    conn = get_connection()
-    try:
-        df = conn.read(worksheet=PAYMENTS_WS, ttl=READ_TTL)
-        df = df.dropna(how="all")
-        for col in PAYMENTS_COLUMNS:
-            if col not in df.columns:
-                df[col] = pd.NA
-        return df[PAYMENTS_COLUMNS].reset_index(drop=True)
-    except Exception:
-        # Tab may be empty — that's fine.
-        return pd.DataFrame(columns=PAYMENTS_COLUMNS)
-
-
-def write_payments(df: pd.DataFrame) -> bool:
-    """Overwrite the Payments tab with `df`. Returns True on success.
-
-    `st-gsheets-connection`'s `update()` replaces the entire worksheet, so the
-    caller must pass the *complete* desired Payments state.
-    """
-    conn = get_connection()
-    try:
-        clean = df[PAYMENTS_COLUMNS].copy()
-        conn.update(worksheet=PAYMENTS_WS, data=clean)
-        return True
-    except Exception as exc:  # pragma: no cover - network/runtime guard
-        st.error(f"Failed to write to the '{PAYMENTS_WS}' tab: {exc}")
-        return False
-
-
-def upsert_session_rows(session_rows: pd.DataFrame) -> bool:
-    """Insert/replace all Payments rows for the session's date.
-
-    Removes any pre-existing rows for the same Date (idempotent re-locking)
-    and appends the freshly calculated rows, then pushes the whole tab back.
-    """
-    if session_rows.empty:
-        st.warning("No checked-in players to write.")
-        return False
-
-    session_date = str(session_rows["Date"].iloc[0])
-    existing = read_payments()
-    # Drop prior rows for this date so re-running the split is idempotent.
-    kept = existing[existing["Date"].astype(str) != session_date]
-    combined = pd.concat([kept, session_rows], ignore_index=True)
-    return write_payments(combined)
-
-
-# =============================================================================
-# Slip Matching Engine (local OCR — reads the amount printed on the slip)
-# -----------------------------------------------------------------------------
-# This reads the numbers printed on the uploaded slip image with Tesseract and
-# matches them against what players still owe. It does NOT verify with the bank
-# that the transfer actually happened — fine for a trusted group; swap in a
-# verification API (e.g. SlipOk) if you need fraud-proofing.
-# =============================================================================
-# Matches Thai-slip money tokens: 1,234.56 / 1234.56 / 100 / ฿100.00 etc.
-_AMOUNT_RE = re.compile(r"\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?")
-
-
-def extract_amounts_from_image(image_bytes: bytes) -> list[float]:
-    """OCR the slip and return all plausible money amounts found, de-duplicated.
-
-    Amounts on Thai bank slips are Arabic numerals, so English OCR is enough.
-    Returns a sorted (desc) list of unique floats; empty list if none / OCR
-    unavailable.
-    """
-    if pytesseract is None or Image is None:
-        st.error(
-            "OCR engine not available. Ensure `pytesseract` + `Pillow` are "
-            "installed and the `tesseract-ocr` system package is present "
-            "(packages.txt on Streamlit Cloud)."
-        )
-        return []
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        text = pytesseract.image_to_string(img)
-    except Exception as exc:  # pragma: no cover - runtime guard
-        st.error(f"Could not read the image: {exc}")
-        return []
-
-    amounts: set[float] = set()
-    for token in _AMOUNT_RE.findall(text):
-        cleaned = token.replace(",", "")
-        try:
-            val = float(cleaned)
-        except ValueError:
-            continue
-        # Ignore obviously-not-a-fee numbers (years, account digits, 0).
-        if 0 < val < 1_000_000:
-            amounts.add(round(val, 2))
-    return sorted(amounts, reverse=True)
-
-
-def match_amounts_to_pending(ledger: pd.DataFrame, amounts: list[float], tol: float = 0.5):
-    """Return pending ledger rows whose AmountDue equals any extracted amount.
-
-    Returns a list of (index, row) tuples — usually one, but can be several if
-    multiple players owe the same amount, in which case the caller disambiguates.
-    """
-    if ledger.empty or not amounts:
-        return []
-    pending = ledger[
-        ledger["PaymentStatus"].astype(str).str.lower() == STATUS_PENDING.lower()
-    ]
-    if pending.empty:
-        return []
-    due = pd.to_numeric(pending["AmountDue"], errors="coerce")
-    matches = []
-    for idx, owed in due.items():
-        if pd.isna(owed):
-            continue
-        if any(abs(float(owed) - a) <= tol for a in amounts):
-            matches.append((idx, ledger.loc[idx]))
-    return matches
-
-
-def mark_player_paid(payments: pd.DataFrame, idx) -> bool:
-    """Flip a single Payments row to Paid and write the whole tab back."""
-    payments.loc[idx, "PaymentStatus"] = STATUS_PAID
-    return write_payments(payments)
-
-
-# =============================================================================
-# Session state initialisation
-# =============================================================================
-def init_state() -> None:
-    ss = st.session_state
-    ss.setdefault("session_date", dt.date.today())
-    ss.setdefault("shuttle_price", DEFAULT_SHUTTLE_PRICE)
-    ss.setdefault("attendance", {})        # {player_name: bool}
-    ss.setdefault("court_hours", {c: 0 for c in COURTS})  # {court: hours}
-    # games: list of {"players": [names], "shuttles": int}
-    ss.setdefault("games", [])
-    ss.setdefault("locked_split", None)    # cached DataFrame after locking
-
-
-# =============================================================================
-# VIEW 1 — On-Court Live Tracker
-# =============================================================================
-def view_live_tracker(players: pd.DataFrame) -> None:
-    st.header("🏟️ On-Court Live Tracker")
-
-    st.session_state.session_date = st.date_input(
-        "Session date", value=st.session_state.session_date
-    )
-
-    # ---- Daily attendance grid -------------------------------------------
-    st.subheader("✅ Attendance")
-    if players.empty:
-        st.info(
-            f"No players found. Add player names to the '{ROSTER_WS}' worksheet."
-        )
+# --- callbacks (write immediately to DB) -------------------------------------
+def _cb_checkin(sid, pid, key):
+    if st.session_state[key]:
+        db.check_in(sid, pid)
     else:
-        st.caption("Tap a player to flag them **Present** for today.")
-        names = players["Name"].tolist()
-        cols = st.columns(2)  # two chunky columns of toggles on mobile
-        for i, name in enumerate(names):
-            with cols[i % 2]:
-                st.session_state.attendance[name] = st.toggle(
-                    name,
-                    value=st.session_state.attendance.get(name, False),
-                    key=f"att_{name}",
-                )
-        present_count = sum(1 for v in st.session_state.attendance.values() if v)
-        st.metric("Players present", present_count)
+        db.check_out(sid, pid)
 
-    st.divider()
 
-    # ---- Courts & hours ---------------------------------------------------
+def _cb_paid(sid, pid, key):
+    db.set_paid(sid, pid, st.session_state[key])
+
+
+def _cb_court(sid, field, key):
+    db.update_session(sid, **{field: int(st.session_state[key])})
+
+
+# =============================================================================
+# PAGE 1 — Session (check-in + games)
+# =============================================================================
+def page_session():
+    st.header("📋 Session")
+    session_date = st.date_input("Session date", value=st.session_state.get("session_date", dt.date.today()))
+    st.session_state.session_date = session_date
+    sid = db.get_or_create_session(session_date)
+    sess = db.get_session(sid)
+
+    # ---- Courts & hours ----
     st.subheader("🏟️ Courts & hours")
-    st.caption(f"{COURT_HOUR_RATE:,.0f} THB per hour, per court — split equally among checked-in players.")
-    for c in COURTS:
-        st.session_state.court_hours[c] = st.radio(
-            f"Court {c} — hours",
-            options=COURT_HOUR_OPTIONS,
-            index=COURT_HOUR_OPTIONS.index(st.session_state.court_hours.get(c, 0)),
-            horizontal=True,
-            key=f"court_{c}",
-        )
-    total_court_hours = sum(st.session_state.court_hours.values())
-    total_court_cost = total_court_hours * COURT_HOUR_RATE
-    st.caption(
-        f"Court cost: {total_court_hours} court-hour(s) × {COURT_HOUR_RATE:,.0f} = "
-        f"**{total_court_cost:,.0f} THB**"
-    )
+    st.caption(f"{sess['court_rate']:,.0f} THB per court per hour (venue cost).")
+    cc = st.columns(len(db.COURTS))
+    fields = {"9": "court9_hours", "10": "court10_hours"}
+    for i, c in enumerate(db.COURTS):
+        with cc[i]:
+            key = f"court_{sid}_{c}"
+            st.radio(
+                f"Court {c} (hrs)", options=[0, 1, 2, 3],
+                index=[0, 1, 2, 3].index(int(sess[fields[c]])),
+                key=key, horizontal=True,
+                on_change=_cb_court, args=(sid, fields[c], key),
+            )
+    total_hours = sess["court9_hours"] + sess["court10_hours"]
+    st.caption(f"Total: **{total_hours} court-hour(s)** → cost {total_hours * sess['court_rate']:,.0f} THB")
 
     st.divider()
 
-    # ---- Per-game players + shuttles -------------------------------------
-    st.subheader("🎮 Games & shuttles")
-    present_names = [n for n, v in st.session_state.attendance.items() if v]
-    st.session_state.shuttle_price = st.number_input(
-        "Shuttle price (THB each)",
-        min_value=0.0,
-        value=float(st.session_state.shuttle_price),
-        step=10.0,
-    )
-    if not present_names:
-        st.caption("Check players in above, then add games, pick who played, and set shuttles used.")
-    else:
-        st.caption(
-            "Each game's shuttle cost is shared among its players "
-            "(e.g. 1 shuttle, 4 players → 25 THB each)."
-        )
-        gc_add, gc_clear = st.columns(2)
-        with gc_add:
-            if st.button("➕ Add game", use_container_width=True):
-                st.session_state.games.append({"players": [], "shuttles": 1})
-        with gc_clear:
-            if st.button("🗑️ Clear games", use_container_width=True):
-                st.session_state.games = []
+    # ---- Check-in ----
+    st.subheader("✅ Check-in")
+    ps, id_to_name, name_to_id = player_maps(active_only=True)
+    att = db.get_attendance(sid)
+    checked_ids = set(int(x) for x in att["player_id"]) if not att.empty else set()
 
-        for gi in range(len(st.session_state.games)):
-            game = st.session_state.games[gi]
+    cols = st.columns(2)
+    for i, (_, p) in enumerate(ps.iterrows()):
+        pid = int(p["id"])
+        with cols[i % 2]:
+            key = f"ci_{sid}_{pid}"
+            label = p["name"] + (" 👤" if p["is_guest"] else "")
+            st.toggle(label, value=pid in checked_ids, key=key,
+                      on_change=_cb_checkin, args=(sid, pid, key))
+    st.metric("Checked in", len(checked_ids))
+
+    with st.expander("➕ Add a player who joined today"):
+        with st.form("add_player", clear_on_submit=True):
+            new_name = st.text_input("Player name")
+            is_guest = st.checkbox("Guest (one-off)", value=True)
+            if st.form_submit_button("Add & check in"):
+                if new_name.strip():
+                    npid = db.add_player(new_name, is_guest=is_guest)
+                    db.check_in(sid, npid)
+                    st.success(f"Added {new_name}.")
+                    st.rerun()
+
+    st.divider()
+
+    # ---- Games ----
+    st.subheader("🎮 Games")
+    att = db.get_attendance(sid)
+    present = list(att["name"]) if not att.empty else []
+    if not present:
+        st.info("Check players in first, then add games.")
+    else:
+        with st.form("add_game", clear_on_submit=True):
+            st.markdown("**Add a game** (usually 4 players)")
+            pick = st.multiselect("Players in this game", options=present, key="newgame_players")
+            sh = st.number_input("Shuttles used", min_value=0, value=1, step=1, key="newgame_shuttles")
+            if st.form_submit_button("➕ Add game"):
+                if pick:
+                    db.add_game(sid, [int(name_to_id[n]) for n in pick], int(sh))
+                    st.rerun()
+                else:
+                    st.warning("Pick at least one player.")
+
+        for g in db.get_games(sid):
             with st.container(border=True):
-                default = [p for p in game.get("players", []) if p in present_names]
-                game["players"] = st.multiselect(
-                    f"เกม {gi + 1} — players",
-                    options=present_names,
-                    default=default,
-                    key=f"game_players_{gi}",
+                st.markdown(f"**Game {g['game_no']}**")
+                cur_names = [id_to_name.get(pid) for pid in g["player_ids"] if pid in id_to_name]
+                pick = st.multiselect(
+                    "Players", options=present, default=[n for n in cur_names if n in present],
+                    key=f"g_players_{g['id']}",
                 )
-                row = st.columns([3, 1])
+                row = st.columns([2, 1, 1])
                 with row[0]:
-                    game["shuttles"] = st.number_input(
-                        "Shuttles used",
-                        min_value=0,
-                        value=int(game.get("shuttles", 1)),
-                        step=1,
-                        key=f"game_shuttles_{gi}",
-                    )
+                    shv = st.number_input("Shuttles", min_value=0, value=int(g["shuttles"]),
+                                          step=1, key=f"g_sh_{g['id']}")
                 with row[1]:
                     st.write("")
-                    if st.button("✕", key=f"delgame_{gi}", help="Remove this game"):
-                        st.session_state.games.pop(gi)
+                    if st.button("💾 Save", key=f"g_save_{g['id']}"):
+                        db.update_game(g["id"], [int(name_to_id[n]) for n in pick], int(shv))
+                        st.toast(f"Game {g['game_no']} updated")
                         st.rerun()
-                np_ = len(game["players"])
-                if np_:
-                    per = game["shuttles"] * st.session_state.shuttle_price / np_
-                    st.caption(
-                        f"{game['shuttles']} shuttle(s) × {st.session_state.shuttle_price:,.0f} "
-                        f"÷ {np_} = **{per:,.2f} THB each**"
-                    )
-
-    # ---- Running cost preview --------------------------------------------
-    n_present = len(present_names)
-    total_shuttle_cost = sum(
-        g.get("shuttles", 0) for g in st.session_state.games
-    ) * st.session_state.shuttle_price
-    grand_total = total_court_cost + total_shuttle_cost
-    st.success(
-        f"**Day total:** {grand_total:,.2f} THB  "
-        f"(Court {total_court_cost:,.0f} + Shuttles {total_shuttle_cost:,.0f} "
-        f"across {len([g for g in st.session_state.games if g.get('players')])} game(s), "
-        f"{n_present} player(s) present)"
-    )
+                with row[2]:
+                    st.write("")
+                    if st.button("🗑️", key=f"g_del_{g['id']}"):
+                        db.delete_game(g["id"])
+                        st.rerun()
 
 
 # =============================================================================
-# VIEW 2 — End-of-Day Split
+# PAGE 2 — Daily summary
 # =============================================================================
-def compute_split(players: pd.DataFrame) -> pd.DataFrame:
-    """Build the per-player split DataFrame for the active session date.
-
-    Cost model:
-      • Court: total court cost = (sum of hours across courts) × COURT_HOUR_RATE,
-        split equally among all checked-in players.
-      • Shuttles: each game's shuttle cost (shuttles × price) is shared equally
-        among that game's players. A player's shuttle share is the sum of their
-        per-game shares.
-    """
-    present_names = [n for n, v in st.session_state.attendance.items() if v]
-    count = len(present_names)
-    if count == 0:
-        return pd.DataFrame(columns=PAYMENTS_COLUMNS)
-
-    # Court cost split equally among checked-in players.
-    total_court_hours = sum(st.session_state.court_hours.values())
-    total_court_cost = total_court_hours * COURT_HOUR_RATE
-    court_share = total_court_cost / count
-
-    # Per-game shuttle cost shared among that game's players.
-    price = float(st.session_state.shuttle_price)
-    shuttle_cost = {name: 0.0 for name in present_names}
-    games_played = {name: 0 for name in present_names}
-    for g in st.session_state.games:
-        valid = [p for p in g.get("players", []) if p in shuttle_cost]
-        if not valid:
-            continue
-        game_cost = g.get("shuttles", 0) * price
-        per = game_cost / len(valid)
-        for p in valid:
-            shuttle_cost[p] += per
-            games_played[p] += 1
-
-    rows = []
-    for name in present_names:
-        cs = round(court_share, 2)
-        ss_ = round(shuttle_cost[name], 2)
-        rows.append(
-            {
-                "Date": str(st.session_state.session_date),
-                "Player": name,
-                "GamesPlayed": games_played[name],
-                "CourtShare": cs,
-                "ShuttleShare": ss_,
-                "AmountDue": round(cs + ss_, 2),
-                "PaymentStatus": STATUS_PENDING,
-            }
-        )
-    return pd.DataFrame(rows, columns=PAYMENTS_COLUMNS)
-
-
-def view_ledger(players: pd.DataFrame) -> None:
-    st.header("🧾 End-of-Day Split")
-
-    present_names = [n for n, v in st.session_state.attendance.items() if v]
-    if not present_names:
-        st.info("No players are checked in yet. Use the **Live Tracker** first.")
+def page_daily():
+    st.header("💰 Daily Summary")
+    session_date = st.date_input("Date", value=st.session_state.get("session_date", dt.date.today()), key="daily_date")
+    sid = db.get_or_create_session(session_date)
+    df = db.compute_daily_split(sid)
+    if df.empty:
+        st.info("No check-ins for this date yet.")
         return
-
-    n_present = len(present_names)
-    n_games = len([g for g in st.session_state.games if g.get("players")])
-    total_court_hours = sum(st.session_state.court_hours.values())
-    total_court_cost = total_court_hours * COURT_HOUR_RATE
-    total_shuttle_cost = sum(
-        g.get("shuttles", 0) for g in st.session_state.games
-    ) * st.session_state.shuttle_price
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Court cost", f"{total_court_cost:,.0f}")
-    m2.metric("Shuttle cost", f"{total_shuttle_cost:,.0f}")
-    m3.metric("Players", f"{n_present}")
+    m1.metric("Players", len(df))
+    m2.metric("Total due", f"{df['Total'].sum():,.0f}")
+    m3.metric("Collected", f"{df.loc[df['Paid'], 'Total'].sum():,.0f}")
 
-    st.caption(
-        f"Court: {total_court_hours} court-hour(s) × {COURT_HOUR_RATE:,.0f} = "
-        f"**{total_court_cost:,.0f}**, split equally → "
-        f"**{(total_court_cost / n_present if n_present else 0):,.2f}/player**. "
-        f"Shuttles: {total_shuttle_cost:,.0f} THB across {n_games} game(s), "
-        f"each game shared among its players."
-    )
+    st.caption("Tick **Paid** as people pay.")
+    _, id_to_name, name_to_id = player_maps(active_only=False)
+    for _, r in df.iterrows():
+        pid = int(name_to_id[r["Player"]])
+        with st.container(border=True):
+            c = st.columns([3, 2, 2])
+            c[0].markdown(f"**{r['Player']}**  \n{int(r['GamesPlayed'])} games")
+            c[1].markdown(f"Court {r['CourtFee']:,.0f}  \nShuttle {r['ShuttleCost']:,.0f}")
+            with c[2]:
+                st.markdown(f"**{r['Total']:,.0f} THB**")
+                key = f"paid_{sid}_{pid}"
+                st.checkbox("Paid", value=bool(r["Paid"]), key=key,
+                            on_change=_cb_paid, args=(sid, pid, key))
 
-    split_df = compute_split(players)
-
-    st.subheader("Split summary")
-    st.dataframe(split_df, use_container_width=True, hide_index=True)
-
-    # ---- Lock & write back to the sheet ----------------------------------
-    if st.button("🔒 Lock totals & write to Payments tab", type="primary"):
-        with st.spinner("Writing to the Payments tab…"):
-            if upsert_session_rows(split_df):
-                st.session_state.locked_split = split_df
-                st.success("Saved to the Payments tab. ✅")
-                st.balloons()
-
-    st.caption(
-        "Collect payments as usual, then reconcile in the **Slip Verify** tab — "
-        "upload the slips you received and they're matched to who owes that amount."
+    st.download_button(
+        "⬇️ Export this day (CSV)",
+        df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"daily_{session_date}.csv", mime="text/csv",
     )
 
 
 # =============================================================================
-# VIEW 3 — Slip Verification Dashboard
+# PAGE 3 — Monthly summary
 # =============================================================================
-def _manual_reconcile(ledger: pd.DataFrame, key_prefix: str) -> None:
-    """Fallback: pick a pending player and mark them Paid by hand."""
-    pending = ledger[
-        ledger["PaymentStatus"].astype(str).str.lower() == STATUS_PENDING.lower()
-    ]
-    if pending.empty:
-        st.info("No pending players to reconcile.")
-        return
-    labels = {
-        f"{r['Player']} — {float(r['AmountDue']):,.2f} THB ({r['Date']})": i
-        for i, r in pending.iterrows()
-    }
-    choice = st.selectbox(
-        "Mark a player paid manually", list(labels.keys()), key=f"{key_prefix}_sel"
-    )
-    if st.button("Mark as Paid", key=f"{key_prefix}_btn"):
-        idx = labels[choice]
-        with st.spinner("Updating Google Sheet…"):
-            if mark_player_paid(ledger, idx):
-                st.success(f"✅ {ledger.loc[idx, 'Player']} marked as Paid.")
-                st.rerun()
+def page_monthly():
+    st.header("📅 Monthly Summary")
+    today = dt.date.today()
+    c1, c2 = st.columns(2)
+    year = c1.number_input("Year", min_value=2024, max_value=2100, value=today.year)
+    month = c2.number_input("Month", min_value=1, max_value=12, value=today.month)
+    s = db.monthly_summary(int(year), int(month))
 
+    a, b, c = st.columns(3)
+    a.metric("Sessions", s["sessions"])
+    b.metric("Court-hours", s["total_court_hours"])
+    c.metric("Attendances", s["attendances"])
+    a2, b2, c2b = st.columns(3)
+    a2.metric("Collected", f"{s['total_revenue']:,.0f}")
+    b2.metric("Costs", f"{s['total_cost']:,.0f}")
+    c2b.metric("Net", f"{s['net']:,.0f}")
 
-def view_slip_verification() -> None:
-    st.header("📥 Slip Verification")
-    st.caption(
-        "Drop a bank-transfer slip. We read the amount printed on it (OCR) and "
-        "match it to the player who owes that amount — then you **confirm** to "
-        "mark them Paid. (Reads the image only; doesn't verify with the bank.)"
+    st.markdown(
+        f"""
+        - **Court rental cost**: {s['court_rental_cost']:,.0f} THB ({s['total_court_hours']} court-hrs × rate)
+        - **Court fees collected**: {s['court_revenue']:,.0f} THB
+        - **Shuttles bought**: {s['shuttles_bought']} → {s['shuttle_purchase_cost']:,.0f} THB
+        - **Shuttle fees collected**: {s['shuttle_revenue']:,.0f} THB
+        - **Net (collected − costs)**: **{s['net']:,.0f} THB**
+        """
     )
 
-    ledger = read_payments()
-
-    uploaded = st.file_uploader(
-        "Upload transfer slip (JPG / PNG)",
-        type=["jpg", "jpeg", "png"],
-        accept_multiple_files=False,
-    )
-
-    if uploaded is not None:
-        st.image(uploaded, caption="Uploaded slip", width=220)
-        if st.button("🔍 Read slip & match", type="primary"):
-            with st.spinner("Reading slip with OCR…"):
-                st.session_state["slip_amounts"] = extract_amounts_from_image(
-                    uploaded.getvalue()
-                )
-
-        amounts = st.session_state.get("slip_amounts")
-        if amounts is not None:
-            if not amounts:
-                st.warning(
-                    "Couldn't read any amount from this slip. Try a clearer photo, "
-                    "or reconcile manually below."
-                )
-            else:
-                st.caption(
-                    "Amounts read from slip: "
-                    + ", ".join(f"{a:,.2f}" for a in amounts)
-                )
-                matches = match_amounts_to_pending(ledger, amounts)
-                if not matches:
-                    st.warning(
-                        "No pending player owes any amount found on this slip. "
-                        "Reconcile manually below."
-                    )
-                else:
-                    st.success(
-                        f"Matched {len(matches)} pending player(s). "
-                        "Confirm to mark Paid:"
-                    )
-                    for idx, row in matches:
-                        with st.container(border=True):
-                            cols = st.columns([3, 2])
-                            cols[0].markdown(
-                                f"**{row['Player']}** — "
-                                f"{float(row['AmountDue']):,.2f} THB ({row['Date']})"
-                            )
-                            if cols[1].button("✅ Confirm Paid", key=f"confirm_{idx}"):
-                                with st.spinner("Updating Google Sheet…"):
-                                    if mark_player_paid(ledger, idx):
-                                        st.success(f"{row['Player']} marked as Paid!")
-                                        st.balloons()
-                                        st.session_state.pop("slip_amounts", None)
-                                        st.rerun()
-
-    st.divider()
-
-    # Always-visible context: today's payment status.
-    if not ledger.empty:
-        today = str(st.session_state.session_date)
-        todays = ledger[ledger["Date"].astype(str) == today]
-        if not todays.empty:
-            st.subheader("Today's payment status")
-            st.dataframe(
-                todays[["Player", "AmountDue", "PaymentStatus"]],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    with st.expander("✋ Manual reconcile"):
-        _manual_reconcile(ledger, "manual")
-
-
-# =============================================================================
-# VIEW 4 — Roster (read-only)
-# =============================================================================
-def view_roster(players: pd.DataFrame) -> None:
-    st.header("👥 Roster")
-    st.caption(
-        f"Players are read live from the '{ROSTER_WS}' worksheet. Add or remove "
-        "players there — this view is read-only so the app never overwrites "
-        "your existing roster columns."
-    )
-    if players.empty:
-        st.info(f"No players found in '{ROSTER_WS}'.")
-        return
-    st.metric("Players in roster", len(players))
-    st.dataframe(players[["Name"]], use_container_width=True, hide_index=True)
-
-
-# =============================================================================
-# VIEW 5 — Season History
-# =============================================================================
-def view_history() -> None:
-    st.header("📊 Season History")
-    ledger = read_payments()
-    if ledger.empty:
-        st.info("No sessions recorded yet. Lock a session to start building history.")
-        return
-
-    led = ledger.copy()
-    led["AmountDue"] = pd.to_numeric(led["AmountDue"], errors="coerce").fillna(0.0)
-    led["GamesPlayed"] = pd.to_numeric(led["GamesPlayed"], errors="coerce").fillna(0)
-    status = led["PaymentStatus"].astype(str).str.lower()
-    led["_paid"] = status.eq(STATUS_PAID.lower())
-
-    # ---- Top-line season metrics -----------------------------------------
-    total_collected = led.loc[led["_paid"], "AmountDue"].sum()
-    total_outstanding = led.loc[~led["_paid"], "AmountDue"].sum()
-    n_sessions = led["Date"].astype(str).nunique()
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Sessions", n_sessions)
-    m2.metric("Collected", f"{total_collected:,.0f}")
-    m3.metric("Outstanding", f"{total_outstanding:,.0f}")
-
-    # ---- Per-player summary ----------------------------------------------
     st.subheader("Per player")
-    per_player = (
-        led.groupby("Player")
-        .agg(
-            Sessions=("Date", "nunique"),
-            TotalDue=("AmountDue", "sum"),
-            Paid=("AmountDue", lambda s: s[led.loc[s.index, "_paid"]].sum()),
+    bd = db.monthly_player_breakdown(int(year), int(month))
+    st.dataframe(bd, use_container_width=True, hide_index=True)
+    if not bd.empty:
+        st.download_button(
+            "⬇️ Export month per-player (CSV)",
+            bd.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"monthly_{int(year)}-{int(month):02d}.csv", mime="text/csv",
         )
-        .reset_index()
-    )
-    per_player["Outstanding"] = per_player["TotalDue"] - per_player["Paid"]
-    per_player = per_player.sort_values("Outstanding", ascending=False)
-    st.dataframe(
-        per_player,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "TotalDue": st.column_config.NumberColumn(format="%.2f"),
-            "Paid": st.column_config.NumberColumn(format="%.2f"),
-            "Outstanding": st.column_config.NumberColumn(format="%.2f"),
-        },
-    )
-
-    # ---- Per-session summary ---------------------------------------------
-    st.subheader("Per session")
-    per_session = (
-        led.groupby("Date")
-        .agg(
-            Players=("Player", "nunique"),
-            Games=("GamesPlayed", "max"),
-            Total=("AmountDue", "sum"),
-            Paid=("_paid", "sum"),
-        )
-        .reset_index()
-        .sort_values("Date", ascending=False)
-    )
-    st.dataframe(
-        per_session,
-        use_container_width=True,
-        hide_index=True,
-        column_config={"Total": st.column_config.NumberColumn(format="%.2f")},
-    )
-
-    # ---- Outstanding-by-player chart -------------------------------------
-    chart_data = per_player[per_player["Outstanding"] > 0].set_index("Player")[
-        ["Outstanding"]
-    ]
-    if not chart_data.empty:
-        st.subheader("Who still owes")
-        st.bar_chart(chart_data)
 
 
 # =============================================================================
-# Main
+# PAGE 4 — Shuttle purchases
 # =============================================================================
-def main() -> None:
-    inject_mobile_css()
-    init_state()
+def page_shuttles():
+    st.header("🛒 Shuttle Purchases")
+    with st.form("buy", clear_on_submit=True):
+        d = st.date_input("Purchase date", value=dt.date.today())
+        q = st.number_input("Quantity", min_value=1, value=12, step=1)
+        u = st.number_input("Unit cost (THB)", min_value=0.0, value=100.0, step=5.0)
+        note = st.text_input("Note", value="")
+        if st.form_submit_button("Record purchase"):
+            db.add_shuttle_purchase(d, int(q), float(u), note)
+            st.success("Recorded.")
+            st.rerun()
+    purch = db.get_shuttle_purchases()
+    if not purch.empty:
+        purch["total"] = purch["quantity"] * purch["unit_cost"]
+        st.dataframe(purch[["purchase_date", "quantity", "unit_cost", "total", "note"]],
+                     use_container_width=True, hide_index=True)
 
-    st.title("🏸 Badminton Team Tracker")
 
-    players = read_players()
+# =============================================================================
+# PAGE 5 — Players
+# =============================================================================
+def page_players():
+    st.header("👥 Players")
+    ps = db.get_players(active_only=False)
+    st.dataframe(ps[["id", "name", "is_guest", "active"]], use_container_width=True, hide_index=True)
+    with st.form("newp", clear_on_submit=True):
+        n = st.text_input("New player name")
+        g = st.checkbox("Guest", value=False)
+        if st.form_submit_button("Add player") and n.strip():
+            db.add_player(n, is_guest=g)
+            st.rerun()
+    st.caption("Deactivate a player (keeps their history, hides from check-in):")
+    for _, p in ps[ps["active"]].iterrows():
+        if st.button(f"Deactivate {p['name']}", key=f"deact_{p['id']}"):
+            db.set_player_active(int(p["id"]), False)
+            st.rerun()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        [
-            "🏟️ Live Tracker",
-            "🧾 Split",
-            "📥 Slip Verify",
-            "👥 Roster",
-            "📊 History",
-        ]
-    )
-    with tab1:
-        view_live_tracker(players)
-    with tab2:
-        view_ledger(players)
-    with tab3:
-        view_slip_verification()
-    with tab4:
-        view_roster(players)
-    with tab5:
-        view_history()
 
-    st.caption("Backed live by Google Sheets · OCR slip reading")
+# =============================================================================
+# PAGE 6 — Data / audit
+# =============================================================================
+def page_data():
+    st.header("🗄️ Data & Audit")
+    st.caption("Raw records for tracing mistakes. Each table exports to CSV.")
+    for name in ["sessions", "attendance", "games", "game_players", "players", "shuttle_purchases"]:
+        with st.expander(name):
+            d = db.table_df(name)
+            st.dataframe(d, use_container_width=True, hide_index=True)
+            st.download_button(f"⬇️ {name}.csv", d.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"{name}.csv", mime="text/csv", key=f"dl_{name}")
+
+
+# =============================================================================
+def main():
+    inject_css()
+    st.title("🏸 Badminton Tracker")
+    tabs = st.tabs(["📋 Session", "💰 Daily", "📅 Monthly", "🛒 Shuttles", "👥 Players", "🗄️ Data"])
+    with tabs[0]:
+        page_session()
+    with tabs[1]:
+        page_daily()
+    with tabs[2]:
+        page_monthly()
+    with tabs[3]:
+        page_shuttles()
+    with tabs[4]:
+        page_players()
+    with tabs[5]:
+        page_data()
 
 
 if __name__ == "__main__":
