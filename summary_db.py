@@ -90,6 +90,9 @@ def _get_pg_conn():
     # Supabase requires SSL — add sslmode if not present
     if "sslmode" not in url:
         url += "&sslmode=require" if "?" in url else "?sslmode=require"
+    # Debug: show host (but mask password)
+    safe = url.split("@")[1] if "@" in url else url.split("://")[1] if "://" in url else url
+    print(f"[DEBUG] Connecting to: {safe.split('?')[0]}")
     conn = psycopg2.connect(url)
     conn.autocommit = False
     return conn
