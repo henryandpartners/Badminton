@@ -23,37 +23,47 @@ try:
 except Exception:
     HAS_STREAMLIT = False
 
-# ── Database URL resolution ─────────────────────────────────────────────
+# Lazy DB URL — resolved on first use, not at import time.
+# Streamlit Cloud secrets aren't available during module import,
+# so we must defer resolution until the app actually needs the DB.
+_DB_URL: str | None = None
+
+
 def _get_database_url() -> str:
     """Resolve the database URL from, in order:
     1. DATABASE_URL environment variable
     2. Streamlit secret 'database_url'
     3. Default SQLite path
     """
+    global _DB_URL
+    if _DB_URL is not None:
+        return _DB_URL
+
     url = os.environ.get("DATABASE_URL", "")
     if url:
-        return url
+        _DB_URL = url
+        return _DB_URL
 
     if HAS_STREAMLIT:
         try:
             url = st.secrets.get("database_url", "")
             if url:
-                return url
+                _DB_URL = url
+                return _DB_URL
         except Exception:
             pass
 
     # Default: SQLite in the app directory
     app_dir = Path(__file__).parent
     db_path = app_dir / ".badminton.db"
-    return f"sqlite:///{db_path}"
-
-
-_DB_URL = _get_database_url()
+    _DB_URL = f"sqlite:///{db_path}"
+    return _DB_URL
 
 
 def _get_conn():
     """Get a database connection appropriate for the URL scheme."""
-    if _DB_URL.startswith("postgresql"):
+    url = _get_database_url()
+    if url.startswith("postgresql"):
         return _get_pg_conn()
     return _get_sqlite_conn()
 
@@ -62,7 +72,7 @@ def _get_sqlite_conn():
     """SQLite connection."""
     import sqlite3
 
-    path = _DB_URL.replace("sqlite:///", "")
+    path = _get_database_url().replace("sqlite:///", "")
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -75,7 +85,7 @@ def _get_pg_conn():
     import psycopg2
     import psycopg2.extras
 
-    url = _DB_URL
+    url = _get_database_url()
     # Supabase requires SSL — add sslmode if not present
     if "sslmode" not in url:
         url += "&sslmode=require" if "?" in url else "?sslmode=require"
@@ -91,7 +101,7 @@ def _get_pg_conn():
 
 def _fetchall(conn, sql: str, params: tuple = ()) -> list[dict]:
     """Execute and return all rows as dicts, regardless of DB backend."""
-    if _DB_URL.startswith("postgresql"):
+    if _get_database_url().startswith("postgresql"):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
@@ -102,7 +112,7 @@ def _fetchall(conn, sql: str, params: tuple = ()) -> list[dict]:
 
 def _fetchone(conn, sql: str, params: tuple = ()) -> dict | None:
     """Execute and return one row as dict, or None."""
-    if _DB_URL.startswith("postgresql"):
+    if _get_database_url().startswith("postgresql"):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
@@ -115,7 +125,7 @@ def _fetchone(conn, sql: str, params: tuple = ()) -> dict | None:
 
 def _execute(conn, sql: str, params: tuple = ()) -> None:
     """Execute a single statement."""
-    if _DB_URL.startswith("postgresql"):
+    if _get_database_url().startswith("postgresql"):
         with conn.cursor() as cur:
             cur.execute(sql, params)
     else:
@@ -127,10 +137,7 @@ def _commit(conn) -> None:
 
 
 def _rollback(conn) -> None:
-    if _DB_URL.startswith("postgresql"):
-        conn.rollback()
-    else:
-        conn.rollback()
+    conn.rollback()
 
 
 def _close(conn) -> None:
@@ -228,7 +235,7 @@ def init_db() -> None:
     """Create tables if they don't exist."""
     conn = _get_conn()
     try:
-        if _DB_URL.startswith("postgresql"):
+        if _get_database_url().startswith("postgresql"):
             for statement in PG_SCHEMA.strip().split(";"):
                 stmt = statement.strip()
                 if stmt:
@@ -267,7 +274,7 @@ def save_session(
 
     conn = _get_conn()
     try:
-        if _DB_URL.startswith("postgresql"):
+        if _get_database_url().startswith("postgresql"):
             _execute(conn,
                 """INSERT INTO sessions
                    (date, day_name, court_hours_court9, court_hours_court10,
@@ -309,14 +316,14 @@ def save_session(
             )
 
         # Get session id
-        row = _fetchone(conn, "SELECT id FROM sessions WHERE date = %s" if _DB_URL.startswith("postgresql") else "SELECT id FROM sessions WHERE date = ?", (date_str,))
+        row = _fetchone(conn, "SELECT id FROM sessions WHERE date = %s" if _get_database_url().startswith("postgresql") else "SELECT id FROM sessions WHERE date = ?", (date_str,))
         if not row:
             _rollback(conn)
             return False
         session_id = row["id"]
 
         # Delete old player + game rows
-        ph = "%s" if _DB_URL.startswith("postgresql") else "?"
+        ph = "%s" if _get_database_url().startswith("postgresql") else "?"
         _execute(conn, f"DELETE FROM session_players WHERE session_id = {ph}", (session_id,))
         _execute(conn, f"DELETE FROM session_games WHERE session_id = {ph}", (session_id,))
 
@@ -369,7 +376,7 @@ def get_sessions() -> list[dict]:
 def get_session(date_str: str) -> dict | None:
     conn = _get_conn()
     try:
-        ph = "%s" if _DB_URL.startswith("postgresql") else "?"
+        ph = "%s" if _get_database_url().startswith("postgresql") else "?"
         return _fetchone(conn, f"SELECT * FROM sessions WHERE date = {ph}", (date_str,))
     finally:
         _close(conn)
@@ -378,7 +385,7 @@ def get_session(date_str: str) -> dict | None:
 def get_session_players(session_id: int) -> list[dict]:
     conn = _get_conn()
     try:
-        ph = "%s" if _DB_URL.startswith("postgresql") else "?"
+        ph = "%s" if _get_database_url().startswith("postgresql") else "?"
         return _fetchall(
             conn,
             f"SELECT * FROM session_players WHERE session_id = {ph} ORDER BY player_name",
@@ -391,7 +398,7 @@ def get_session_players(session_id: int) -> list[dict]:
 def get_session_games(session_id: int) -> list[dict]:
     conn = _get_conn()
     try:
-        ph = "%s" if _DB_URL.startswith("postgresql") else "?"
+        ph = "%s" if _get_database_url().startswith("postgresql") else "?"
         return _fetchall(
             conn,
             f"SELECT * FROM session_games WHERE session_id = {ph} ORDER BY game_number",
@@ -448,7 +455,7 @@ def get_session_summaries() -> list[dict]:
 def get_player_history(player_name: str) -> list[dict]:
     conn = _get_conn()
     try:
-        ph = "%s" if _DB_URL.startswith("postgresql") else "?"
+        ph = "%s" if _get_database_url().startswith("postgresql") else "?"
         return _fetchall(conn, f"""
             SELECT s.date, s.day_name, sp.games_played,
                    sp.shuttle_cost, sp.court_fee, sp.total, sp.payment_status
@@ -493,7 +500,7 @@ def get_stats() -> dict:
 def update_payment_status(session_id: int, player_name: str, status: str) -> bool:
     conn = _get_conn()
     try:
-        ph = "%s" if _DB_URL.startswith("postgresql") else "?"
+        ph = "%s" if _get_database_url().startswith("postgresql") else "?"
         _execute(conn,
             f"UPDATE session_players SET payment_status = {ph} WHERE session_id = {ph} AND player_name = {ph}",
             (status, session_id, player_name),
@@ -509,7 +516,7 @@ def update_payment_status(session_id: int, player_name: str, status: str) -> boo
 def set_player_court_fee(session_id: int, player_name: str, court_fee: float) -> bool:
     conn = _get_conn()
     try:
-        ph = "%s" if _DB_URL.startswith("postgresql") else "?"
+        ph = "%s" if _get_database_url().startswith("postgresql") else "?"
         _execute(conn,
             f"UPDATE session_players SET court_fee = {ph}, total = shuttle_cost + {ph} WHERE session_id = {ph} AND player_name = {ph}",
             (court_fee, court_fee, session_id, player_name),
@@ -524,12 +531,13 @@ def set_player_court_fee(session_id: int, player_name: str, court_fee: float) ->
 
 def get_db_info() -> dict:
     """Return info about the current database connection."""
-    is_pg = _DB_URL.startswith("postgresql")
+    url = _get_database_url()
+    is_pg = url.startswith("postgresql")
     host = ""
-    if is_pg and "@" in _DB_URL:
-        host = _DB_URL.split("@")[1].split("?")[0].split(":")[0]
+    if is_pg and "@" in url:
+        host = url.split("@")[1].split("?")[0].split(":")[0]
     return {
         "type": "PostgreSQL" if is_pg else "SQLite",
         "host": host,
-        "url": _DB_URL.split("@")[-1] if "@" in _DB_URL else _DB_URL,
+        "url": url.split("@")[-1] if "@" in url else url,
     }
