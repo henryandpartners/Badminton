@@ -75,10 +75,18 @@ def _get_pg_conn():
     import psycopg2
     import psycopg2.extras
 
-    conn = psycopg2.connect(_DB_URL)
-    conn.autocommit = False
-    # Return dict-like rows
-    return conn
+    url = _DB_URL
+    # Supabase requires SSL — add sslmode if not present
+    if "sslmode" not in url:
+        url += "&sslmode=require" if "?" in url else "?sslmode=require"
+    try:
+        conn = psycopg2.connect(url)
+        conn.autocommit = False
+        return conn
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not connect to PostgreSQL at {url.split('@')[-1].split('?')[0]}: {e}"
+        ) from e
 
 
 def _fetchall(conn, sql: str, params: tuple = ()) -> list[dict]:
@@ -513,7 +521,12 @@ def set_player_court_fee(session_id: int, player_name: str, court_fee: float) ->
 
 def get_db_info() -> dict:
     """Return info about the current database connection."""
+    is_pg = _DB_URL.startswith("postgresql")
+    host = ""
+    if is_pg and "@" in _DB_URL:
+        host = _DB_URL.split("@")[1].split("?")[0].split(":")[0]
     return {
-        "type": "PostgreSQL" if _DB_URL.startswith("postgresql") else "SQLite",
+        "type": "PostgreSQL" if is_pg else "SQLite",
+        "host": host,
         "url": _DB_URL.split("@")[-1] if "@" in _DB_URL else _DB_URL,
     }

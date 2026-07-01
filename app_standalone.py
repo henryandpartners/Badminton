@@ -566,6 +566,13 @@ def main() -> None:
     init_state()
 
     st.title("🏸 Badminton Tracker")
+
+    # Show which database is active
+    db_info = sdb.get_db_info()
+    if db_info["type"] == "PostgreSQL":
+        st.success(f"✅ Connected to cloud database ({db_info['host']})")
+    else:
+        st.warning("⚠️ Running on local SQLite — data will reset on redeploy")
     st.caption("Standalone — no Google Sheets needed")
 
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -584,7 +591,11 @@ def main() -> None:
     with tab4:
         view_export()
 
-    st.caption(f"Powered by {sdb.get_db_info()['type']} database · Data never leaves your machine")
+    db_info = sdb.get_db_info()
+    db_label = f"{db_info['type']}"
+    if db_info.get("host"):
+        db_label += f" · {db_info['host']}"
+    st.caption(f"Powered by {db_label}")
 
 
 if __name__ == "__main__":
