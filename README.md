@@ -5,11 +5,9 @@ A mobile-friendly app for tracking badminton sessions, backed by a **database**
 per-game players & shuttles, court hours, payments, and monthly summaries — with
 CSV export and a raw-data audit view so you can trace mistakes.
 
-Two frontends share the same database layer (`db.py`):
-
-- **`main.py` — NiceGUI** (recommended): smooth, no full-page reruns, sortable/
-  searchable data tables. Run with `python main.py`.
-- **`app.py` — Streamlit**: the original UI. Run with `streamlit run app.py`.
+The UI is **NiceGUI** (`main.py`) — smooth, no full-page reruns, with sortable/
+searchable data tables. The original Streamlit UI is preserved on the
+`claude/streamlit-legacy` branch.
 
 No Google Sheets, no API keys required for local use.
 

@@ -1,10 +1,8 @@
-# --- Frontends (two options, both use db.py) --------------------------------
-# NiceGUI = the smooth primary UI (run: python main.py). Needs a host that runs
-# a long-lived process (Render / Railway / Fly.io / VPS).
+# --- Frontend (NiceGUI) -----------------------------------------------------
+# Run: python main.py  — needs a host that runs a long-lived process
+# (Render / Railway / Fly.io / VPS). The old Streamlit UI lives on the
+# `claude/streamlit-legacy` branch.
 nicegui>=2.0.0
-# Streamlit = the original UI (run: streamlit run app.py). Deploys on Streamlit
-# Community Cloud. Optional — remove if you only want NiceGUI.
-streamlit>=1.40.0,<1.59.0
 
 # --- Data -------------------------------------------------------------------
 pandas>=2.0.0
