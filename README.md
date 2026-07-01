@@ -1,9 +1,15 @@
 # 🏸 Badminton Tracker
 
-A mobile-friendly **Streamlit** app for tracking badminton sessions, backed by a
-**database** (SQLite locally, or **Supabase/Postgres** in the cloud). Tracks
-daily check-ins, per-game players & shuttles, court hours, payments, and monthly
-summaries — with CSV export and a raw-data audit view so you can trace mistakes.
+A mobile-friendly app for tracking badminton sessions, backed by a **database**
+(SQLite locally, or **Supabase/Postgres** in the cloud). Tracks daily check-ins,
+per-game players & shuttles, court hours, payments, and monthly summaries — with
+CSV export and a raw-data audit view so you can trace mistakes.
+
+Two frontends share the same database layer (`db.py`):
+
+- **`main.py` — NiceGUI** (recommended): smooth, no full-page reruns, sortable/
+  searchable data tables. Run with `python main.py`.
+- **`app.py` — Streamlit**: the original UI. Run with `streamlit run app.py`.
 
 No Google Sheets, no API keys required for local use.
 
@@ -37,25 +43,38 @@ All defaults live in `db.py` and are easy to change; court hours/fee/shuttle pri
 
 ```bash
 pip install -r requirements.txt
-streamlit run app.py          # uses a local SQLite file, seeded with the roster
+
+python main.py                # NiceGUI → http://localhost:8080
+# or
+streamlit run app.py          # Streamlit → http://localhost:8501
 ```
 
-The starting roster (โรจน์, น้อย, ภูมี, …) is seeded automatically on first run.
+The starting roster (โรจน์, น้อย, ภูมี, …) is seeded automatically on first run,
+into a local `sqlite:///badminton.db` file.
 
-### Deploy on Streamlit Cloud (with persistent data)
+### Persistent data (Supabase)
 
-Streamlit Cloud's disk is wiped on restart, so **use Supabase** (free Postgres)
-so your data survives:
+For a deployed app, point it at Supabase (free Postgres) so data survives:
 
-1. Create a Supabase project → **Project Settings → Database → Connection string (URI)** (use the pooling URI).
-2. In the deployed app → **Settings → Secrets**, add:
-   ```toml
-   [database]
-   url = "postgresql://USER:PASSWORD@HOST:PORT/postgres"
+1. Supabase project → **Project Settings → Database → Connection string (URI)** (use the **pooling** URI, port 6543).
+2. Provide it as either an env var or a Streamlit secret:
+   ```bash
+   export DATABASE_URL="postgresql://USER:PASSWORD@HOST:6543/postgres"   # NiceGUI / any host
    ```
-3. Deploy (repo + branch + `app.py`). Tables are created automatically on first run.
+   ```toml
+   # .streamlit/secrets.toml (Streamlit)
+   [database]
+   url = "postgresql://USER:PASSWORD@HOST:6543/postgres"
+   ```
+Tables are created automatically on first run.
 
-Locally, no secrets are needed — it falls back to `sqlite:///badminton.db`.
+### Hosting
+
+- **NiceGUI (`main.py`)** runs a long-lived server — deploy on **Render**,
+  **Railway**, **Fly.io**, or a VPS. Set `DATABASE_URL` (Supabase) and it reads
+  `PORT` from the environment. It is **not** compatible with Streamlit Community Cloud.
+- **Streamlit (`app.py`)** deploys on **Streamlit Community Cloud**, but its disk
+  is ephemeral — use Supabase there too.
 
 ---
 
