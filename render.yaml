@@ -1,0 +1,21 @@
+# Render Blueprint — deploy the NiceGUI app as a web service.
+# In Render: New + → Blueprint → connect this repo → it reads this file.
+services:
+  - type: web
+    name: badminton-tracker
+    runtime: python
+    plan: free
+    branch: claude/badminton-tracker-streamlit-ljgyh5
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /
+    envVars:
+      # Set this in the Render dashboard to your Supabase pooling URI (secret).
+      # Without it the app falls back to ephemeral SQLite (data lost on restart).
+      - key: DATABASE_URL
+        sync: false
+      # Signs NiceGUI's per-client storage; auto-generated, keep stable.
+      - key: STORAGE_SECRET
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: "3.11.9"

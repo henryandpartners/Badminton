@@ -66,13 +66,21 @@ For a deployed app, point it at Supabase (free Postgres) so data survives:
    ```
 Tables are created automatically on first run.
 
-### Hosting
+### Deploy on Render (recommended)
 
-- **NiceGUI (`main.py`)** runs a long-lived server — deploy on **Render**,
-  **Railway**, **Fly.io**, or a VPS. Set `DATABASE_URL` (Supabase) and it reads
-  `PORT` from the environment. It is **not** compatible with Streamlit Community Cloud.
-- **Streamlit (`app.py`)** deploys on **Streamlit Community Cloud**, but its disk
-  is ephemeral — use Supabase there too.
+This repo ships a `render.yaml` Blueprint. NiceGUI needs a host that runs a
+long-lived process (not Streamlit Community Cloud).
+
+1. Push to GitHub, then in **[render.com](https://render.com)**: **New + → Blueprint**,
+   connect this repo. Render reads `render.yaml` and creates the web service
+   (`buildCommand: pip install -r requirements.txt`, `startCommand: python main.py`).
+2. In the service's **Environment**, set **`DATABASE_URL`** to your Supabase
+   pooling URI (port 6543). Without it the app uses ephemeral SQLite.
+3. Deploy. Render assigns a URL and injects `PORT` (the app reads it). Tables are
+   created and the roster seeded on first run.
+
+Other hosts (Railway, Fly.io, a VPS) work the same way — just run `python main.py`
+with `DATABASE_URL` set.
 
 ---
 
