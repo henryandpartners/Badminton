@@ -85,15 +85,26 @@ def _get_pg_conn():
     """PostgreSQL connection via psycopg2."""
     import psycopg2
     import psycopg2.extras
+    from urllib.parse import urlparse
 
     url = _get_database_url()
-    # Supabase requires SSL — add sslmode if not present
-    if "sslmode" not in url:
-        url += "&sslmode=require" if "?" in url else "?sslmode=require"
-    # Debug: show host (but mask password)
-    safe = url.split("@")[1] if "@" in url else url.split("://")[1] if "://" in url else url
-    print(f"[DEBUG] Connecting to: {safe.split('?')[0]}")
-    conn = psycopg2.connect(url)
+    # Parse the URL into components
+    parsed = urlparse(url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 5432
+    user = parsed.username or "postgres"
+    password = parsed.password or ""
+    dbname = parsed.path.lstrip("/") if parsed.path else "postgres"
+
+    conn = psycopg2.connect(
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        dbname=dbname,
+        sslmode="require",
+        connect_timeout=10,
+    )
     conn.autocommit = False
     return conn
 
