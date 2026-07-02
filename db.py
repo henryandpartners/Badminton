@@ -53,8 +53,10 @@ SEED_PLAYERS = [
 
 metadata = MetaData()
 
+# Tables use a `bt_` prefix so this app owns its own namespace and can never
+# collide with tables left behind by other apps in a shared database.
 players = Table(
-    "players", metadata,
+    "bt_players", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("name", String(120), nullable=False, unique=True),
     Column("is_guest", Boolean, nullable=False, default=False),
@@ -63,7 +65,7 @@ players = Table(
 )
 
 sessions = Table(
-    "sessions", metadata,
+    "bt_sessions", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("session_date", Date, nullable=False, unique=True),
     Column("court9_hours", Integer, nullable=False, default=0),
@@ -76,34 +78,34 @@ sessions = Table(
 )
 
 attendance = Table(
-    "attendance", metadata,
+    "bt_attendance", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("session_id", Integer, ForeignKey("sessions.id"), nullable=False),
-    Column("player_id", Integer, ForeignKey("players.id"), nullable=False),
+    Column("session_id", Integer, ForeignKey("bt_sessions.id"), nullable=False),
+    Column("player_id", Integer, ForeignKey("bt_players.id"), nullable=False),
     Column("paid", Boolean, nullable=False, default=False),
     Column("created_at", DateTime, default=dt.datetime.utcnow),
     UniqueConstraint("session_id", "player_id", name="uq_attendance"),
 )
 
 games = Table(
-    "games", metadata,
+    "bt_games", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("session_id", Integer, ForeignKey("sessions.id"), nullable=False),
+    Column("session_id", Integer, ForeignKey("bt_sessions.id"), nullable=False),
     Column("game_no", Integer, nullable=False),
     Column("shuttles", Integer, nullable=False, default=1),
     Column("created_at", DateTime, default=dt.datetime.utcnow),
 )
 
 game_players = Table(
-    "game_players", metadata,
+    "bt_game_players", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("game_id", Integer, ForeignKey("games.id"), nullable=False),
-    Column("player_id", Integer, ForeignKey("players.id"), nullable=False),
+    Column("game_id", Integer, ForeignKey("bt_games.id"), nullable=False),
+    Column("player_id", Integer, ForeignKey("bt_players.id"), nullable=False),
     UniqueConstraint("game_id", "player_id", name="uq_game_player"),
 )
 
 shuttle_purchases = Table(
-    "shuttle_purchases", metadata,
+    "bt_shuttle_purchases", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("purchase_date", Date, nullable=False),
     Column("quantity", Integer, nullable=False),
