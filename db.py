@@ -154,7 +154,7 @@ def get_engine():
 def init_db(seed: bool = True) -> None:
     """Create tables if missing and seed the starting roster once."""
     eng = get_engine()
-    metadata.create_all(eng)
+    metadata.create_all(eng, checkfirst=True)
     if seed:
         with eng.begin() as cx:
             existing = cx.execute(select(func.count()).select_from(players)).scalar()
