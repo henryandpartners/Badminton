@@ -8,7 +8,7 @@ services:
     branch: claude/badminton-tracker-streamlit-ljgyh5
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
-    healthCheckPath: /
+    healthCheckPath: /healthz
     envVars:
       # Set this in the Render dashboard to your Supabase pooling URI (secret).
       # Without it the app falls back to ephemeral SQLite (data lost on restart).

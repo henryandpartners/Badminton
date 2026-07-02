@@ -15,11 +15,35 @@ import datetime as dt
 import os
 
 import pandas as pd
+from nicegui import app as ng_app
 from nicegui import ui
 
 import db
 
-db.init_db()
+# --- DB init: lazy + resilient ----------------------------------------------
+# Don't let a transient DB error at import crash the whole server (that fails
+# Render's health check). Initialise on first use and retry if it failed.
+_db_ready = False
+
+
+def ensure_db() -> None:
+    global _db_ready
+    if not _db_ready:
+        db.init_db()
+        _db_ready = True
+
+
+try:
+    ensure_db()
+except Exception as exc:  # pragma: no cover
+    print(f"[startup] deferred DB init (will retry on first request): {exc}")
+
+
+# Lightweight health check for Render/Railway — no DB, no page render.
+@ng_app.get("/healthz")
+def _healthz():
+    return {"status": "ok"}
+
 
 # --- shared UI state ---------------------------------------------------------
 state = {"date": dt.date.today()}
@@ -350,6 +374,17 @@ def index():
     ui.colors(primary="#16a34a")
     with ui.header().classes("items-center"):
         ui.label("🏸 Badminton Tracker").classes("text-xl font-bold")
+    # Make sure the DB is ready; show a clear message instead of a blank 500.
+    try:
+        ensure_db()
+    except Exception as exc:
+        ui.label("⚠️ Cannot reach the database").classes("text-xl font-bold text-red-600")
+        ui.label(str(exc)).classes("text-sm")
+        ui.label(
+            "Check the DATABASE_URL environment variable (Supabase pooling URI, "
+            "port 6543). The app retries on refresh."
+        ).classes("text-sm text-gray-500")
+        return
     with ui.tabs().classes("w-full") as tabs:
         t_session = ui.tab("Session", icon="event")
         t_daily = ui.tab("Daily", icon="payments")
