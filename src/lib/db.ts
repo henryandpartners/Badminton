@@ -92,7 +92,7 @@ export async function addPlayer(name: string, isGuest = false): Promise<number |
 // --- Sessions ----------------------------------------------------------------
 export async function getOrCreateSession(date: string): Promise<number> {
   const sb = createClient();
-  const { data } = await sb.from("bt_sessions").select("id").eq("session_date", date).single();
+  const { data } = await sb.from("bt_sessions").select("id").eq("session_date", date).maybeSingle();
   if (data) return data.id;
   const { data: created } = await sb.from("bt_sessions").insert({ session_date: date }).select("id").single();
   return created!.id;
@@ -100,7 +100,7 @@ export async function getOrCreateSession(date: string): Promise<number> {
 
 export async function getSession(sessionId: number): Promise<Session | null> {
   const sb = createClient();
-  const { data } = await sb.from("bt_sessions").select("*").eq("id", sessionId).single();
+  const { data } = await sb.from("bt_sessions").select("*").eq("id", sessionId).maybeSingle();
   return data as Session | null;
 }
 

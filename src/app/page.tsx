@@ -20,7 +20,7 @@ export default function Home() {
   const initDb = useCallback(async () => {
     try {
       const sb = createClient();
-      const { error } = await sb.from("bt_players").select("count", { count: "exact", head: true });
+      const { error } = await sb.from("bt_players").select("id", { count: "exact", head: true });
       if (error) throw error;
       setDbReady(true);
     } catch (e: unknown) {
