@@ -45,19 +45,29 @@ export default function SessionTab({ date, onDateChange }: Props) {
   const nameToId = Object.fromEntries(players.map((p) => [p.name, p.id]));
 
   const load = useCallback(async () => {
-    const sid = await getOrCreateSession(date);
-    setSessionId(sid);
-    const [sess, att, gms, ps] = await Promise.all([
-      getSession(sid),
-      getAttendance(sid),
-      getGames(sid),
-      getPlayers(true),
-    ]);
-    setSession(sess);
-    setAttendance(att);
-    setGames_(gms);
-    setPlayers(ps);
-    setLoading(false);
+    // Timeout fetch after 10s
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    try {
+      const sid = await getOrCreateSession(date);
+      setSessionId(sid);
+      const [sess, att, gms, ps] = await Promise.all([
+        getSession(sid),
+        getAttendance(sid),
+        getGames(sid),
+        getPlayers(true),
+      ]);
+      setSession(sess);
+      setAttendance(att);
+      setGames_(gms);
+      setPlayers(ps);
+    } catch (e) {
+      console.error("Failed to load session:", e);
+    } finally {
+      clearTimeout(timeoutId);
+      setLoading(false);
+    }
   }, [date]);
 
   useEffect(() => {

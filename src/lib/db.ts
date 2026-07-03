@@ -114,7 +114,7 @@ export async function checkIn(sessionId: number, playerId: number) {
   const sb = createClient();
   const { data } = await sb.from("bt_attendance").select("id").eq("session_id", sessionId).eq("player_id", playerId).maybeSingle();
   if (!data) {
-    await sb.from("bt_attendance").insert({ session_id: sessionId, player_id: playerId });
+    await sb.from("bt_attendance").insert({ session_id: sessionId, player_id: playerId, paid: false });
   }
 }
 
