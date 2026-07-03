@@ -185,20 +185,29 @@ export default function SessionTab({ date, onDateChange }: Props) {
           </span>
         </div>
         <div className="grid grid-cols-2 gap-1">
-          {players.map((p) => (
-            <label
-              key={p.id}
-              className="flex items-center gap-2 py-1.5 px-2 rounded-lg active:bg-gray-100"
-            >
-              <input
-                type="checkbox"
-                checked={checkedIds.has(p.id)}
-                onChange={(e) => togglePlayer(p.id, e.target.checked)}
-                className="w-4 h-4 accent-green-600 rounded"
-              />
-              <span className="text-sm">{p.name}{p.is_guest ? " 👤" : ""}</span>
-            </label>
-          ))}
+          {players.map((p) => {
+            const isChecked = checkedIds.has(p.id);
+            return (
+              <button
+                key={p.id}
+                onClick={() => togglePlayer(p.id, !isChecked)}
+                className={`flex items-center gap-2 py-2.5 px-3 rounded-lg text-left w-full active:scale-[0.97] transition-transform ${
+                  isChecked ? "bg-green-50 border border-green-200" : "bg-gray-50 border border-gray-100"
+                }`}
+              >
+                <span
+                  className={`w-5 h-5 rounded-full border-2 flex items-center justify-center text-xs shrink-0 ${
+                    isChecked
+                      ? "bg-green-600 border-green-600 text-white"
+                      : "border-gray-300"
+                  }`}
+                >
+                  {isChecked ? "✓" : ""}
+                </span>
+                <span className="text-sm font-medium">{p.name}{p.is_guest ? " 👤" : ""}</span>
+              </button>
+            );
+          })}
         </div>
         <button
           onClick={() => setShowAddPlayer(!showAddPlayer)}
