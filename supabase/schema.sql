@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS bt_sessions (
     session_date DATE NOT NULL UNIQUE,
     court9_hours INTEGER NOT NULL DEFAULT 0,
     court10_hours INTEGER NOT NULL DEFAULT 0,
-    court_rate FLOAT NOT NULL DEFAULT 155.0,
+    court_rate FLOAT NOT NULL DEFAULT 160.0,
     court_fee FLOAT NOT NULL DEFAULT 80.0,
     shuttle_price FLOAT NOT NULL DEFAULT 100.0,
     note VARCHAR(500) DEFAULT '',

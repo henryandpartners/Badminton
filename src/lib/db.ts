@@ -8,7 +8,7 @@ import { createClient } from "./supabase/client";
 
 // --- Defaults ----------------------------------------------------------------
 export const DEFAULT_COURT_FEE = 80.0;
-export const DEFAULT_COURT_RATE = 155.0;
+export const DEFAULT_COURT_RATE = 160.0;
 export const DEFAULT_SHUTTLE_PRICE = 100.0;
 export const COURTS = ["9", "10"] as const;
 
