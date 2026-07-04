@@ -67,6 +67,20 @@ export interface DailySplitRow {
   Paid: boolean;
 }
 
+// --- Monthly detail types ----------------------------------------------------
+export interface MonthlySessionDetail {
+  session: Session;
+  attendanceCount: number;
+  totalGames: number;
+  totalShuttlesUsed: number;
+  totalCourtHours: number;
+  courtRevenue: number;
+  shuttleRevenue: number;
+  netRevenue: number;
+  players: AttendanceRow[];
+  games: GameRow[];
+}
+
 // --- Players -----------------------------------------------------------------
 export async function getPlayers(activeOnly = true): Promise<Player[]> {
   const sb = createClient();
@@ -315,4 +329,55 @@ export async function monthlySummary(year: number, month: number) {
     total_cost: Math.round(totalCost * 100) / 100,
     net: Math.round((totalRevenue - totalCost) * 100) / 100,
   };
+}
+
+// --- Monthly session details for the Monthly tab --------------------------------
+export async function getMonthlySessions(year: number, month: number): Promise<MonthlySessionDetail[]> {
+  const sb = createClient();
+  const start = `${year}-${String(month).padStart(2, "0")}-01`;
+  const endMonth = month === 12 ? 1 : month + 1;
+  const endYear = month === 12 ? year + 1 : year;
+  const end = `${endYear}-${String(endMonth).padStart(2, "0")}-01`;
+
+  const { data: srows } = await sb.from("bt_sessions").select("*").gte("session_date", start).lt("session_date", end).order("session_date");
+  if (!srows) return [];
+
+  const sessions = srows as Session[];
+  const results: MonthlySessionDetail[] = [];
+
+  for (const sess of sessions) {
+    const att = await getAttendance(sess.id);
+    const games = await getGames(sess.id);
+
+    const totalGames = games.length;
+    const totalShuttlesUsed = games.reduce((s, g) => s + g.shuttles, 0);
+    const totalCourtHours = sess.court9_hours + sess.court10_hours;
+    const courtRevenue = att.length * Number(sess.court_fee);
+
+    // Compute shuttle revenue per player from games
+    const shuttleCostMap: Record<number, number> = {};
+    for (const a of att) shuttleCostMap[a.player_id] = 0;
+    for (const g of games) {
+      const valid = g.player_ids.filter((p) => p in shuttleCostMap);
+      if (!valid.length) continue;
+      const per = (g.shuttles * Number(sess.shuttle_price)) / valid.length;
+      for (const p of valid) shuttleCostMap[p] += per;
+    }
+    const shuttleRevenue = Object.values(shuttleCostMap).reduce((s, v) => s + v, 0);
+
+    results.push({
+      session: sess,
+      attendanceCount: att.length,
+      totalGames,
+      totalShuttlesUsed,
+      totalCourtHours,
+      courtRevenue: Math.round(courtRevenue * 100) / 100,
+      shuttleRevenue: Math.round(shuttleRevenue * 100) / 100,
+      netRevenue: Math.round((courtRevenue + shuttleRevenue) * 100) / 100,
+      players: att,
+      games,
+    });
+  }
+
+  return results;
 }
