@@ -10,6 +10,8 @@ import { createClient } from "./supabase/client";
 export const DEFAULT_COURT_FEE = 80.0;
 export const DEFAULT_COURT_RATE = 160.0;
 export const DEFAULT_SHUTTLE_PRICE = 100.0;
+// Default shuttle cost price (what the organizer pays per tube of 12)
+export const DEFAULT_SHUTTLE_COST_PRICE = 80.0;
 export const COURTS = ["9", "10"] as const;
 
 export const SEED_PLAYERS = [
@@ -76,7 +78,11 @@ export interface MonthlySessionDetail {
   totalCourtHours: number;
   courtRevenue: number;
   shuttleRevenue: number;
-  netRevenue: number;
+  revenue: number;
+  courtRentalCost: number;
+  shuttleExpense: number;
+  expense: number;
+  netProfit: number;
   players: AttendanceRow[];
   games: GameRow[];
 }
@@ -365,6 +371,10 @@ export async function getMonthlySessions(year: number, month: number): Promise<M
     }
     const shuttleRevenue = Object.values(shuttleCostMap).reduce((s, v) => s + v, 0);
 
+    // Expenses
+    const courtRentalCost = totalCourtHours * Number(sess.court_rate);
+    const shuttleExpense = totalShuttlesUsed * DEFAULT_SHUTTLE_COST_PRICE;
+
     results.push({
       session: sess,
       attendanceCount: att.length,
@@ -373,7 +383,11 @@ export async function getMonthlySessions(year: number, month: number): Promise<M
       totalCourtHours,
       courtRevenue: Math.round(courtRevenue * 100) / 100,
       shuttleRevenue: Math.round(shuttleRevenue * 100) / 100,
-      netRevenue: Math.round((courtRevenue + shuttleRevenue) * 100) / 100,
+      revenue: Math.round((courtRevenue + shuttleRevenue) * 100) / 100,
+      courtRentalCost: Math.round(courtRentalCost * 100) / 100,
+      shuttleExpense: Math.round(shuttleExpense * 100) / 100,
+      expense: Math.round((courtRentalCost + shuttleExpense) * 100) / 100,
+      netProfit: Math.round((courtRevenue + shuttleRevenue - courtRentalCost - shuttleExpense) * 100) / 100,
       players: att,
       games,
     });

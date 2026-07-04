@@ -7,6 +7,7 @@ import {
   updateSession,
   updateGame,
   deleteGame,
+  getShuttlePurchases,
 } from "@/lib/db";
 
 function fmtDate(d: string) {
@@ -80,19 +81,26 @@ export default function MonthlyTab() {
   const totalGames = sessions.reduce((s, d) => s + d.totalGames, 0);
   const totalShuttles = sessions.reduce((s, d) => s + d.totalShuttlesUsed, 0);
   const totalCourtHrs = sessions.reduce((s, d) => s + d.totalCourtHours, 0);
-  const totalRevenue = sessions.reduce((s, d) => s + d.netRevenue, 0);
+  const totalRevenue = sessions.reduce((s, d) => s + d.revenue, 0);
+  const totalExpense = sessions.reduce((s, d) => s + d.expense, 0);
+  const totalCourtRental = sessions.reduce((s, d) => s + d.courtRentalCost, 0);
+  const totalShuttleExpense = sessions.reduce((s, d) => s + d.shuttleExpense, 0);
+  const totalProfit = sessions.reduce((s, d) => s + d.netProfit, 0);
+  const avgCourtRate = totalCourtHrs > 0 ? Math.round(totalCourtRental / totalCourtHrs) : 0;
 
-  // CSV export
+  // CSV — summary with expenses
   const csvHeader =
-    "Date,Sessions,Players,Games,ShuttlesUsed,CourtHours,CourtRevenue,ShuttleRevenue,TotalRevenue\n";
+    "Date,Sessions,Players,Games,ShuttlesUsed,CourtHours,"
+    + "CourtRevenue,ShuttleRevenue,Revenue,"
+    + "CourtRentalCost,ShuttleExpense,Expense,NetProfit\n";
   const csvRows = sessions
     .map(
       (d) =>
-        `${d.session.session_date},1,${d.attendanceCount},${d.totalGames},${d.totalShuttlesUsed},${d.totalCourtHours},${d.courtRevenue},${d.shuttleRevenue},${d.netRevenue}`
+        `${d.session.session_date},1,${d.attendanceCount},${d.totalGames},${d.totalShuttlesUsed},${d.totalCourtHours},${d.courtRevenue},${d.shuttleRevenue},${d.revenue},${d.courtRentalCost},${d.shuttleExpense},${d.expense},${d.netProfit}`
     )
     .join("\n");
   const csvDetailHeader =
-    "Date,Player,GamesPlayed,ShuttleCost,CourtFee,Total\n";
+    "Date,Player,GamesPlayed,ShuttleCost,CourtFee,Total,Paid\n";
   const csvDetailRows = sessions
     .flatMap((d) => {
       const courtFee = Number(d.session.court_fee);
@@ -120,6 +128,7 @@ export default function MonthlyTab() {
           Math.round(shuttleCost[a.player_id] * 100) / 100,
           courtFee,
           Math.round((courtFee + shuttleCost[a.player_id]) * 100) / 100,
+          a.paid ? "Yes" : "No",
         ].join(",")
       );
     })
@@ -177,8 +186,8 @@ export default function MonthlyTab() {
 
       {sessions.length > 0 && (
         <>
-          {/* Summary metrics */}
-          <div className="grid grid-cols-3 gap-2">
+          {/* Summary metrics — revenue & expenses */}
+          <div className="grid grid-cols-2 gap-2">
             <div className="metric-card">
               <p className="text-lg font-bold">{sessions.length}</p>
               <p className="text-[10px] text-gray-500">Sessions</p>
@@ -200,8 +209,52 @@ export default function MonthlyTab() {
               <p className="text-[10px] text-gray-500">Court-hrs</p>
             </div>
             <div className="metric-card">
-              <p className="text-lg font-bold">{fmt(totalRevenue)}</p>
+              <p className="text-lg font-bold text-green-600">{fmt(totalRevenue)}</p>
               <p className="text-[10px] text-gray-500">Revenue ฿</p>
+            </div>
+          </div>
+
+          {/* Expenses section */}
+          <div className="card">
+            <p className="text-xs font-bold mb-2">💰 Expenses</p>
+            <div className="space-y-1 text-xs">
+              <div className="flex justify-between">
+                <span className="text-gray-500">🏟️ Court rental ({totalCourtHrs}h × {avgCourtRate}/hr)</span>
+                <span className="font-medium">{fmt(totalCourtRental)} ฿</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">🏸 Shuttle ({totalShuttles} used)</span>
+                <span className="font-medium">{fmt(totalShuttleExpense)} ฿</span>
+              </div>
+              <div className="border-t border-gray-200 pt-1 flex justify-between font-bold">
+                <span>Total expense</span>
+                <span className="text-red-600">{fmt(totalExpense)} ฿</span>
+              </div>
+              <div className="flex justify-between text-sm font-bold pt-1 border-t border-gray-200">
+                <span>Net profit</span>
+                <span className={totalProfit >= 0 ? "text-green-600" : "text-red-600"}>
+                  {totalProfit >= 0 ? "+" : ""}{fmt(totalProfit)} ฿
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Per-session P&L mini table */}
+          <div className="card">
+            <p className="text-[10px] text-gray-400 font-medium mb-1">Per session P&amp;L</p>
+            <div className="space-y-1 text-xs">
+              {sessions.map((d) => (
+                <div key={d.session.id} className="flex justify-between items-center">
+                  <span className="text-gray-600">{fmtDate(d.session.session_date)}</span>
+                  <div className="flex gap-3">
+                    <span className="text-green-600">+{fmt(d.revenue)}</span>
+                    <span className="text-red-500">−{fmt(d.expense)}</span>
+                    <span className={`font-bold ${d.netProfit >= 0 ? "text-green-700" : "text-red-600"}`}>
+                      = {d.netProfit >= 0 ? "+" : ""}{fmt(d.netProfit)}
+                    </span>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -250,8 +303,8 @@ export default function MonthlyTab() {
                       )}
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs text-gray-400">
-                        {s.court9_hours + s.court10_hours}h · {fmt(d.netRevenue)}฿
+                      <span className={`text-xs font-medium ${d.netProfit >= 0 ? "text-green-600" : "text-red-500"}`}>
+                        {d.netProfit >= 0 ? "+" : ""}{fmt(d.netProfit)}฿
                       </span>
                       <span className="text-xs">{isExpanded ? "▲" : "▼"}</span>
                     </div>
@@ -337,12 +390,33 @@ export default function MonthlyTab() {
                         </div>
                       </div>
 
-                      {/* Session summary stats */}
-                      <div className="grid grid-cols-4 gap-1 text-xs bg-gray-50 rounded-lg p-2">
+                      {/* Session P&L stats */}
+                      <div className="grid grid-cols-2 gap-1 text-xs bg-gray-50 rounded-lg p-2">
                         <div><span className="text-gray-400">Players: </span>{d.attendanceCount}</div>
                         <div><span className="text-gray-400">Games: </span>{d.totalGames}</div>
                         <div><span className="text-gray-400">Shuttles: </span>{d.totalShuttlesUsed}</div>
-                        <div><span className="text-gray-400">Revenue: </span>{fmt(d.netRevenue)}฿</div>
+                        <div><span className="text-gray-400">Court hrs: </span>{d.totalCourtHours}</div>
+                        <div className="text-green-600"><span className="text-gray-400">Revenue: </span>+{fmt(d.revenue)}฿</div>
+                        <div className="text-red-500"><span className="text-gray-400">Expense: </span>−{fmt(d.expense)}฿</div>
+                        <div className="col-span-2 font-bold">
+                          <span className="text-gray-400">Net: </span>
+                          <span className={d.netProfit >= 0 ? "text-green-600" : "text-red-600"}>
+                            {d.netProfit >= 0 ? "+" : ""}{fmt(d.netProfit)}฿
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Expense breakdown */}
+                      <div className="text-xs bg-red-50 rounded-lg p-2">
+                        <p className="text-[10px] text-gray-500 font-medium mb-1">💰 Expense breakdown</p>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Court rental ({d.totalCourtHours}h × {s.court_rate}/hr)</span>
+                          <span>{fmt(d.courtRentalCost)} ฿</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Shuttle ({d.totalShuttlesUsed} used)</span>
+                          <span>{fmt(d.shuttleExpense)} ฿</span>
+                        </div>
                       </div>
 
                       {/* Players list */}
