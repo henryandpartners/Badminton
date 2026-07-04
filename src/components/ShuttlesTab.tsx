@@ -1,9 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getShuttlePurchases, addShuttlePurchase, ShuttlePurchase } from "@/lib/db";
+import {
+  getShuttlePurchases,
+  addShuttlePurchase,
+  updateShuttlePurchase,
+  deleteShuttlePurchase,
+  ShuttlePurchase,
+} from "@/lib/db";
 
 type PurchWithTotal = ShuttlePurchase & { total: number };
+type EditingRow = {
+  id: number;
+  purchase_date: string;
+  quantity: number;
+  unit_cost: number;
+  note: string;
+};
 
 export default function ShuttlesTab() {
   const [purchases, setPurchases] = useState<PurchWithTotal[]>([]);
@@ -12,6 +25,7 @@ export default function ShuttlesTab() {
   const [quantity, setQuantity] = useState(12);
   const [unitCost, setUnitCost] = useState(100);
   const [note, setNote] = useState("");
+  const [editing, setEditing] = useState<EditingRow | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -27,6 +41,25 @@ export default function ShuttlesTab() {
   const handleAdd = async () => {
     await addShuttlePurchase(date, quantity, unitCost, note);
     setNote("");
+    load();
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editing) return;
+    await updateShuttlePurchase(editing.id, {
+      purchase_date: editing.purchase_date,
+      quantity: editing.quantity,
+      unit_cost: editing.unit_cost,
+      note: editing.note,
+    });
+    setEditing(null);
+    load();
+  };
+
+  const handleCancelEdit = () => setEditing(null);
+
+  const handleDelete = async (id: number) => {
+    await deleteShuttlePurchase(id);
     load();
   };
 
@@ -79,20 +112,97 @@ export default function ShuttlesTab() {
 
       {/* Purchase history */}
       <div className="space-y-2">
+        <p className="text-sm font-bold">📋 Purchase History</p>
         {purchases.length === 0 ? (
           <p className="text-center text-gray-400 py-8 text-sm">No purchases yet</p>
         ) : (
-          purchases.map((p) => (
-            <div key={p.id} className="card flex justify-between items-center">
-              <div>
-                <p className="text-sm font-medium">{p.purchase_date}</p>
-                <p className="text-xs text-gray-400">
-                  {p.quantity} × {p.unit_cost}฿ {p.note ? `· ${p.note}` : ""}
-                </p>
+          purchases.map((p) => {
+            const isEditing = editing?.id === p.id;
+            return (
+              <div key={p.id} className="card">
+                {isEditing ? (
+                  <div className="space-y-2">
+                    <input
+                      type="date"
+                      value={editing.purchase_date}
+                      onChange={(e) => setEditing({ ...editing, purchase_date: e.target.value })}
+                      className="input text-xs"
+                    />
+                    <div className="flex gap-2">
+                      <div className="flex-1">
+                        <label className="text-[10px] text-gray-400">Qty</label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={editing.quantity}
+                          onChange={(e) => setEditing({ ...editing, quantity: Number(e.target.value) })}
+                          className="input text-xs"
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <label className="text-[10px] text-gray-400">Unit cost</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={editing.unit_cost}
+                          onChange={(e) => setEditing({ ...editing, unit_cost: Number(e.target.value) })}
+                          className="input text-xs"
+                        />
+                      </div>
+                    </div>
+                    <input
+                      placeholder="Note"
+                      value={editing.note}
+                      onChange={(e) => setEditing({ ...editing, note: e.target.value })}
+                      className="input text-xs"
+                    />
+                    <div className="flex gap-2">
+                      <button onClick={handleSaveEdit} className="btn-primary btn-sm flex-1 text-xs">
+                        💾 Save
+                      </button>
+                      <button onClick={handleCancelEdit} className="btn-outline btn-sm flex-1 text-xs">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <p className="text-sm font-medium">{p.purchase_date}</p>
+                      <p className="text-xs text-gray-400">
+                        {p.quantity} × {p.unit_cost}฿ {p.note ? `· ${p.note}` : ""}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold">{p.total} ฿</span>
+                      <div className="flex flex-col gap-0.5">
+                        <button
+                          onClick={() =>
+                            setEditing({
+                              id: p.id,
+                              purchase_date: p.purchase_date,
+                              quantity: p.quantity,
+                              unit_cost: p.unit_cost,
+                              note: p.note,
+                            })
+                          }
+                          className="text-[10px] text-green-600 font-medium leading-none"
+                        >
+                          ✏️
+                        </button>
+                        <button
+                          onClick={() => handleDelete(p.id)}
+                          className="text-[10px] text-red-400 font-medium leading-none"
+                        >
+                          🗑️
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
-              <span className="text-sm font-bold">{p.total} ฿</span>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>

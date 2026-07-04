@@ -247,6 +247,16 @@ export async function getShuttlePurchases(): Promise<ShuttlePurchase[]> {
   return (data || []) as ShuttlePurchase[];
 }
 
+export async function updateShuttlePurchase(id: number, fields: Partial<Pick<ShuttlePurchase, "purchase_date" | "quantity" | "unit_cost" | "note">>) {
+  const sb = createClient();
+  await sb.from("bt_shuttle_purchases").update(fields).eq("id", id);
+}
+
+export async function deleteShuttlePurchase(id: number) {
+  const sb = createClient();
+  await sb.from("bt_shuttle_purchases").delete().eq("id", id);
+}
+
 // --- Calculations ------------------------------------------------------------
 export async function computeDailySplit(sessionId: number): Promise<DailySplitRow[]> {
   const sess = await getSession(sessionId);
