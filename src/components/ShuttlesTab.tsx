@@ -30,7 +30,7 @@ export default function ShuttlesTab() {
   const load = async () => {
     setLoading(true);
     const p = await getShuttlePurchases();
-    setPurchases(p.map((r) => ({ ...r, total: r.quantity * r.unit_cost })));
+    setPurchases(p.map((r) => ({ ...r, total: Math.round(r.quantity * r.unit_cost * 100) / 100 })));
     setLoading(false);
   };
 
@@ -38,10 +38,15 @@ export default function ShuttlesTab() {
     load();
   }, []);
 
+  const reload = async () => {
+    const p = await getShuttlePurchases();
+    setPurchases(p.map((r) => ({ ...r, total: Math.round(r.quantity * r.unit_cost * 100) / 100 })));
+  };
+
   const handleAdd = async () => {
     await addShuttlePurchase(date, quantity, unitCost, note);
     setNote("");
-    load();
+    reload();
   };
 
   const handleSaveEdit = async () => {
@@ -53,14 +58,14 @@ export default function ShuttlesTab() {
       note: editing.note,
     });
     setEditing(null);
-    load();
+    reload();
   };
 
   const handleCancelEdit = () => setEditing(null);
 
   const handleDelete = async (id: number) => {
     await deleteShuttlePurchase(id);
-    load();
+    reload();
   };
 
   if (loading) {
