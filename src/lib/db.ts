@@ -94,7 +94,19 @@ export async function getOrCreateSession(date: string): Promise<number> {
   const sb = createClient();
   const { data } = await sb.from("bt_sessions").select("id").eq("session_date", date).maybeSingle();
   if (data) return data.id;
-  const { data: created } = await sb.from("bt_sessions").insert({ session_date: date }).select("id").single();
+  const { data: created } = await sb
+    .from("bt_sessions")
+    .insert({
+      session_date: date,
+      court9_hours: 0,
+      court10_hours: 0,
+      court_rate: DEFAULT_COURT_RATE,
+      court_fee: DEFAULT_COURT_FEE,
+      shuttle_price: DEFAULT_SHUTTLE_PRICE,
+      note: "",
+    })
+    .select("id")
+    .single();
   return created!.id;
 }
 
