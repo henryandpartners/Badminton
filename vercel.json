@@ -1,4 +1,4 @@
 {
-  "buildCommand": "next build",
+  "buildCommand": "NEXT_TURBOPACK_USE_WORKER=0 next build",
   "outputDirectory": ".next"
 }
