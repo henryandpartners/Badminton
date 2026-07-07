@@ -109,6 +109,11 @@ export async function addPlayer(name: string, isGuest = false): Promise<number |
   return data?.id ?? null;
 }
 
+export async function togglePlayerActive(id: number, active: boolean) {
+  const sb = createClient();
+  await sb.from("bt_players").update({ active }).eq("id", id);
+}
+
 // --- Sessions ----------------------------------------------------------------
 export async function getOrCreateSession(date: string): Promise<number> {
   const sb = createClient();

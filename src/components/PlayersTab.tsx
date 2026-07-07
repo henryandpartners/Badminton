@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getPlayers, addPlayer, Player } from "@/lib/db";
+import { getPlayers, addPlayer, togglePlayerActive, Player } from "@/lib/db";
+
+type Tab = "active" | "inactive";
 
 export default function PlayersTab() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState("");
   const [isGuest, setIsGuest] = useState(false);
+  const [tab, setTab] = useState<Tab>("active");
 
   const load = async () => {
     setLoading(true);
@@ -24,6 +27,11 @@ export default function PlayersTab() {
     await addPlayer(newName, isGuest);
     setNewName("");
     setIsGuest(false);
+    load();
+  };
+
+  const handleToggle = async (p: Player) => {
+    await togglePlayerActive(p.id, !p.active);
     load();
   };
 
@@ -65,32 +73,69 @@ export default function PlayersTab() {
         </div>
       </div>
 
-      {/* Active players */}
-      <div>
-        <p className="text-sm font-bold text-green-600 mb-2">Active ({active.length})</p>
+      {/* Tab switcher */}
+      <div className="flex gap-1 border-b border-gray-700">
+        <button
+          onClick={() => setTab("active")}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-t transition-colors ${
+            tab === "active"
+              ? "bg-green-700 text-white"
+              : "text-gray-400 hover:text-white"
+          }`}
+        >
+          Active ({active.length})
+        </button>
+        <button
+          onClick={() => setTab("inactive")}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-t transition-colors ${
+            tab === "inactive"
+              ? "bg-gray-600 text-white"
+              : "text-gray-400 hover:text-white"
+          }`}
+        >
+          Inactive ({inactive.length})
+        </button>
+      </div>
+
+      {/* Player list */}
+      {tab === "active" ? (
         <div className="space-y-1">
+          {active.length === 0 && (
+            <p className="text-xs text-gray-500 text-center py-4">No active players</p>
+          )}
           {active.map((p) => (
             <div key={p.id} className="card flex justify-between items-center py-2.5">
               <span className="text-sm">
                 {p.name}
                 {p.is_guest ? <span className="text-xs text-gray-400 ml-1">👤 guest</span> : null}
               </span>
+              <button
+                onClick={() => handleToggle(p)}
+                className="text-xs text-gray-400 hover:text-yellow-400 transition-colors"
+                title="Deactivate"
+              >
+                Deactivate
+              </button>
             </div>
           ))}
         </div>
-      </div>
-
-      {/* Inactive */}
-      {inactive.length > 0 && (
-        <div>
-          <p className="text-sm font-bold text-gray-400 mb-2">Inactive ({inactive.length})</p>
-          <div className="space-y-1 opacity-50">
-            {inactive.map((p) => (
-              <div key={p.id} className="card flex justify-between items-center py-2.5">
-                <span className="text-sm">{p.name}</span>
-              </div>
-            ))}
-          </div>
+      ) : (
+        <div className="space-y-1">
+          {inactive.length === 0 && (
+            <p className="text-xs text-gray-500 text-center py-4">No inactive players</p>
+          )}
+          {inactive.map((p) => (
+            <div key={p.id} className="card flex justify-between items-center py-2.5 opacity-60">
+              <span className="text-sm">{p.name}</span>
+              <button
+                onClick={() => handleToggle(p)}
+                className="text-xs text-green-500 hover:text-green-400 transition-colors"
+                title="Reactivate"
+              >
+                Reactivate
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
