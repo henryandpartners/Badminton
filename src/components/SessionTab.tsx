@@ -164,7 +164,7 @@ export default function SessionTab({ date, onDateChange }: Props) {
             <div key={c} className="flex-1 text-center">
               <p className="text-xs font-medium mb-1">Court {c}</p>
               <div className="flex justify-center gap-1">
-                {[0, 1, 2, 3].map((h) => (
+                {[0, 1, 2, 3, 4].map((h) => (
                   <button
                     key={h}
                     onClick={async () => {
